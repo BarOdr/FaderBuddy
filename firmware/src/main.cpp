@@ -1438,10 +1438,20 @@ void loop() {
   // Process any I2C requests that were queued by ISR callbacks
   process_i2c_requests();
 
+  // ptc_touch latches a failed calibration (timeout or compensation out of
+  // range) in state.error and then skips the node for good; its recal request
+  // doesn't clear the flag. Seen on 1-2 of 8 boards at power-up, leaving the
+  // reference at 0 and touch dead until a power cycle. Retry instead.
+  if (touch_sensor.state.error) {
+    touch_sensor.state.error = 0;
+    ptc_node_request_recal(&touch_sensor);
+  }
+
   if (pending_calibrate_touch) {
     pending_calibrate_touch = false;
     motor_coast();
     delay(10);
+    touch_sensor.state.error = 0;
     ptc_node_request_recal(&touch_sensor);
     // for (uint8_t i = 0; i < 4; i++) {
     //   digitalWrite(PIN_LED, HIGH);

@@ -47,6 +47,11 @@ for production purposes.
 
 ## Firmware (ATtiny1616)
 
+### Unreleased
+
+- Touch sensing recovers from a failed PTC calibration instead of staying dead
+  until a power cycle.
+
 ### 1.5
 
 - Haptics (detents and magnetic ends) now run through the same control law as
