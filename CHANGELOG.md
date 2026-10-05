@@ -32,7 +32,8 @@ that check it will read `0xFFFF` and should treat that as firmware 1.0.
 All boards built to date - all are essentially identical, with minor changes
 for production purposes.
 
-- **v1.3.1** (pre-release) - adds a panelized gerber/BOM/CPL export for
+- **v1.3.2** - tunes panelization parameters for bulk ordering
+- **v1.3.1** - adds a panelized gerber/BOM/CPL export for
   ordering 10 boards per panel. Only board change is two vias moved 0.75mm
   for mousebite clearance.
 - **v1.3** - design files migrated to KiCad 10 (from 8); back silkscreen
@@ -46,11 +47,22 @@ for production purposes.
 
 ## Firmware (ATtiny1616)
 
-### 1.4 - unreleased
+### 1.5
+
+- Haptics (detents and magnetic ends) now run through the same control law as
+  remote moves - position loop, plant-model feedforward and velocity loop -
+  instead of a separate proportional controller. A released fader decelerates
+  into its detent rather than overshooting and oscillating around it, and
+  per-unit motor characterisation now applies to haptics too.
+- Haptics switched from fast- to slow-decay drive to match the plant model, so
+  the strength scale was remapped: the cap now runs from 110 duty (strength 0)
+  to full (strength 7). The feel of each strength level has changed.
+
+### 1.4
 
 - Version bump only, for testing a firmware update.
 
-### 1.3 - unreleased
+### 1.3
 
 - Firmware can be updated over I2C. A bootloader in the ATtiny1616's boot
   section receives the new application image, and `REG_ENTER_BOOTLOADER` (0x10)
@@ -130,14 +142,24 @@ layer-addressed registers.
 
 ## ESPHome component
 
-### 0.4.1 - unreleased
+### 0.5.0 - in development / unreleased
 
+- **Breaking:** `text_sensor: platform: fader_buddy`, deprecated since 0.3.0,
+  is removed. A config still using it fails validation with instructions:
+  delete the `text_sensor:` block and move any `name:`/`icon:` onto the hub's
+  `serial_number:` key.
 - Installing firmware on several faders at once (e.g. Home Assistant's
   **Update all**) now updates each in turn, instead of refusing all but the
   first. A waiting fader shows as installing in Home Assistant and
   **Update pending** on its Status sensor. `fader_buddy.update_firmware` waits
   the same way, and its `on_firmware_update_result` fires when the update
   actually finishes.
+- Packages firmware v1.5
+- The Status sensor now shows self-calibration progress and its result -
+  succeeded, failed (no travel found), or incomplete (endpoints found but the
+  motor measurement was discarded, leaving default motor tuning) - so a run can
+  be checked from Home Assistant without the logs. A fader whose motor has
+  never been calibrated says so at startup.
 
 ### 0.4.0
 
