@@ -72,7 +72,6 @@ const uint8_t FW_VERSION_FOOTER[2] = {
 #define MOVEMENT_TIMEOUT_MILLIS (8000)
 #define TOUCH_OVERRIDE_DURATION_THRESHOLD (50)
 #define REMOTE_MOVEMENT_STEADY_THRESHOLD (300)
-#define IDLE_DURATION_THRESHOLD (1000)
 
 // Haptic parameters. Haptics pull toward a target through the same control law
 // as remote moves (move_toward()), so there is no separate force model here -
@@ -248,6 +247,11 @@ uint32_t remote_movement_start = 0;
 uint32_t touch_state_change_millis = 0;
 uint32_t remote_movement_steady_start = 0;
 uint32_t input_last_change_millis = 0;
+// REG_IDLE_DURATION: written only by the main loop (from i2c_idle_duration_write),
+// read by the I2C request ISR, which runs with interrupts off, so it sees a whole
+// value as long as the main loop updates it with interrupts disabled.
+volatile uint16_t idle_duration_ms = IDLE_DURATION_DEFAULT_MS;
+volatile uint16_t i2c_idle_duration_write = 0;  // 0: no write pending
 uint16_t remote_movement_start_position = 0;
 
 // Tap detection state
@@ -447,6 +451,8 @@ void onI2cRequest() {
         (uint8_t)move_deadband,
       };
       Wire.write(vals, 12);
+  } else if (r == REG_IDLE_DURATION) {
+      i2c_write_u16(idle_duration_ms);
   } else if (r == REG_ACTIVE_LAYER) {
       Wire.write(active_layer);
   } else if (r == REG_LAYER_TARGET) {
@@ -515,6 +521,14 @@ void onI2cReceive(int howMany) {
         i2c_layer_haptic_write.layer = Wire.read() & 0x07;
         i2c_layer_haptic_write.config = ((uint16_t)Wire.read() << 8) | Wire.read();
         i2c_layer_haptic_write.valid = true;
+      }
+      break;
+    case REG_IDLE_DURATION:
+      if (howMany == 3) {  // register + u16 big-endian
+        uint8_t high = Wire.read();
+        i2c_idle_duration_write = idle_duration_from_wire(high, Wire.read());
+      } else {
+        while (Wire.available()) Wire.read();
       }
       break;
     case REG_ENTER_BOOTLOADER:
@@ -988,7 +1002,7 @@ void motor_update() {
         if (timeout_error < 0) timeout_error = -timeout_error;
         if (timeout_error <= MOVE_TIMEOUT_TOLERANCE) {
           motor_coast();
-          input_last_change_millis = now - IDLE_DURATION_THRESHOLD;
+          input_last_change_millis = now - idle_duration_ms;
           set_mode(Mode::MODE_INPUT_IDLE);
         } else {
           set_mode(Mode::MODE_ERROR);
@@ -1055,7 +1069,7 @@ void motor_update() {
               position_window_lower = input_ewma - WINDOW_SIZE / 2;
               position_window_upper = position_window_lower + WINDOW_SIZE;
             }
-            input_last_change_millis = now - IDLE_DURATION_THRESHOLD;
+            input_last_change_millis = now - idle_duration_ms;
             set_mode(Mode::MODE_INPUT_IDLE);
           }
         }
@@ -1068,7 +1082,7 @@ void motor_update() {
         layer_restore_positions[active_layer] = current_pos;
       }
 
-      if (now > input_last_change_millis + IDLE_DURATION_THRESHOLD && (state & STATE_TOUCH_bm) == 0 && now > touch_state_change_millis + IDLE_DURATION_THRESHOLD) {
+      if (now > input_last_change_millis + idle_duration_ms && (state & STATE_TOUCH_bm) == 0 && now > touch_state_change_millis + idle_duration_ms) {
         motor_coast();
         if (pending_report_on_idle) {
           pending_report_on_idle = false;
@@ -1108,7 +1122,7 @@ void motor_update() {
         break;  // Exit switch since state may change
       }
 
-      if (now < input_last_change_millis + IDLE_DURATION_THRESHOLD || ((state & STATE_TOUCH_bm) != 0 && now > touch_state_change_millis + TOUCH_OVERRIDE_DURATION_THRESHOLD)) {
+      if (now < input_last_change_millis + idle_duration_ms || ((state & STATE_TOUCH_bm) != 0 && now > touch_state_change_millis + TOUCH_OVERRIDE_DURATION_THRESHOLD)) {
         set_mode(Mode::MODE_INPUT_ACTIVE);
       }
       break;
@@ -1305,6 +1319,19 @@ void process_i2c_requests() {
 
   layer_change = i2c_layer_change_request;
   i2c_layer_change_request = 0xFF;
+
+  // Applied here, with interrupts off, so the request ISR never reads half of it.
+  if (i2c_idle_duration_write != 0) {
+    // An idle fader went idle with input_last_change_millis at least the old
+    // time ago (forced idle sets it exactly that far back). A longer time
+    // would make it look recently moved and wake it with no hand on it, so
+    // move the mark back by the difference.
+    if (get_mode() == Mode::MODE_INPUT_IDLE && i2c_idle_duration_write > idle_duration_ms) {
+      input_last_change_millis -= i2c_idle_duration_write - idle_duration_ms;
+    }
+    idle_duration_ms = i2c_idle_duration_write;
+    i2c_idle_duration_write = 0;
+  }
 
   if (i2c_layer_target_write.valid) {
     has_layer_target = true;
@@ -1566,7 +1593,7 @@ void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
           reset_tap_detection();
 
           // Force state to idle after double-tap completion
-          input_last_change_millis = now - IDLE_DURATION_THRESHOLD;
+          input_last_change_millis = now - idle_duration_ms;
           set_mode(MODE_INPUT_IDLE);
         }
       } else {
