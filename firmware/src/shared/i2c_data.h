@@ -179,8 +179,13 @@
  * MODE_INPUT_ACTIVE for MODE_INPUT_IDLE. While INPUT_ACTIVE the fader ignores
  * position writes, so this is the delay between letting go of a fader and the
  * host being able to move it again. A shorter time makes the fader respond
- * sooner after a release; a longer one gives a hand that hovers without
- * touching more time before the motor may move.
+ * sooner after a release. A resting hand is protected by the touch bit, not by
+ * this time; the time matters when the touch bit drops out under a hand that
+ * does not move, or a hand hovers just off the cap. If a dropout lasts longer
+ * than this time the fader goes idle, and a host move starts under the hand
+ * until the touch bit returns (then the touch override stops it). Choose the
+ * time from measured dropout lengths; the minimum below is a bound on what the
+ * firmware accepts, not a recommendation.
  *
  * Not stored: every reset starts at IDLE_DURATION_DEFAULT_MS, so a host that
  * wants another value writes it again after the fader resets. A write outside
