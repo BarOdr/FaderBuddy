@@ -118,7 +118,9 @@
  * -----|---------------------|---------|------|------------
  * 0x12 | MOTOR_CAL           | R       |u8[12]| Measured motor characteristics (see below)
  * -----|---------------------|---------|------|------------
- * 0x13 | ...                 |         |      | (free - next production register goes here)
+ * 0x13 | IDLE_DURATION       | R/W     | u16  | Input idle time in ms (see below)
+ * -----|---------------------|---------|------|------------
+ * 0x14 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -168,6 +170,32 @@
 #define REG_ENTER_BOOTLOADER 0x10  // Write ENTER_BOOTLOADER_MAGIC (u32 big-endian) to reboot into the bootloader
 #define REG_FW_VERSION 0x11  // Application firmware version (R, u16 big-endian, see FW_VERSION)
 #define REG_MOTOR_CAL 0x12  // Measured motor characteristics (R, 12 bytes, see below)
+#define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
+
+/*
+ * REG_IDLE_DURATION (0x13) - read/write, u16 big-endian, milliseconds.
+ *
+ * How long the fader must be still, and its touch released, before it leaves
+ * MODE_INPUT_ACTIVE for MODE_INPUT_IDLE. While INPUT_ACTIVE the fader ignores
+ * position writes, so this is the delay between letting go of a fader and the
+ * host being able to move it again. A shorter time makes the fader respond
+ * sooner after a release; a longer one gives a hand that hovers without
+ * touching more time before the motor may move.
+ *
+ * Not stored: every reset starts at IDLE_DURATION_DEFAULT_MS, so a host that
+ * wants another value writes it again after the fader resets. A write outside
+ * IDLE_DURATION_MIN_MS..IDLE_DURATION_MAX_MS is clamped to that range; a read
+ * returns the value in use. Firmware without this register reads back 0xFFFF
+ * (see FW_VERSION_NONE), which is outside the range.
+ */
+#define IDLE_DURATION_DEFAULT_MS (1000)
+#define IDLE_DURATION_MIN_MS (100)
+#define IDLE_DURATION_MAX_MS (5000)
+
+// The idle time a REG_IDLE_DURATION write of these two bytes selects.
+static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
+  return (uint16_t)(((uint16_t)high << 8) | low);
+}
 
 /*
  * REG_MOTOR_CAL (0x12) - read-only, 12 bytes.
