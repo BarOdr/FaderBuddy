@@ -26,7 +26,6 @@ from esphome.components import button, i2c, update
 # attribute of this package, which would shadow a plain `text_sensor` name here.
 from esphome.components import text_sensor as core_text_sensor
 from esphome.const import CONF_ID, CONF_MODE, CONF_NAME
-from esphome.core import CORE
 
 MULTI_CONF = True
 DEPENDENCIES = ["i2c"]
@@ -94,6 +93,7 @@ RELEASE_TAG_PREFIX = "releases/firmware/"
 KNOWN_FIRMWARE: dict[str, str] = {
     "1.3": "e5f192e8cee97a866a59082b76ac9f49f562df2a45a45adb5ffa3c46efb2fce8",
     "1.4": "520f219774fb17b3e875ca77cb7a49d06e047d219ec19d13240157dd7eeb5a10",
+    "1.5": "fb0e1f8a6c73e3ea8cef2b8ad7a9336b62903f62ed9a3137fbbb37ece7aab2cf",
 }
 
 
@@ -271,9 +271,6 @@ FaderBuddyUpdate = fader_buddy_ns.class_(
     "FaderBuddyUpdate", update.UpdateEntity, cg.Parented.template(FaderBuddy)
 )
 
-# Used by platform files (e.g. text_sensor) to reference the parent hub
-CONF_FADER_BUDDY_ID = "fader_buddy_id"
-
 # Define haptic mode enum (in global namespace, shared with firmware)
 HapticMode = cg.global_ns.enum("HapticMode")
 HAPTIC_MODES = {
@@ -405,23 +402,6 @@ def _has_firmware(config):
     return config.get(CONF_FIRMWARE) is not None or CONF_FIRMWARE_IMAGE in config
 
 
-def _claimed_by_legacy_platform(config, key):
-    """True if a `text_sensor: platform: fader_buddy` block already provides this.
-
-    The deprecated platform form calls the same setter, so without this check a
-    config using it would get two entities for one sensor - the hub's own, left
-    unpublished, and the platform's. Drop the hub's in that case, so migrating
-    is a pure deletion of the old block.
-    """
-    for entry in CORE.config.get("text_sensor", []):
-        if entry.get("platform") != "fader_buddy":
-            continue
-        if entry.get(CONF_FADER_BUDDY_ID) != config[CONF_ID]:
-            continue
-        if key in entry:
-            return True
-    return False
-
 # Unitless move speed: 255 is full speed, 0 the slowest smooth motion
 SPEED_FULL = 255
 
@@ -501,9 +481,8 @@ async def to_code(config):
     if CONF_INVERT in config:
         cg.add(var.set_invert(config[CONF_INVERT]))
 
-    if not _claimed_by_legacy_platform(config, CONF_SERIAL_NUMBER):
-        sens = await core_text_sensor.new_text_sensor(config[CONF_SERIAL_NUMBER])
-        cg.add(var.set_serial_text_sensor(sens))
+    sens = await core_text_sensor.new_text_sensor(config[CONF_SERIAL_NUMBER])
+    cg.add(var.set_serial_text_sensor(sens))
     sens = await core_text_sensor.new_text_sensor(config[CONF_STATUS])
     cg.add(var.set_status_text_sensor(sens))
 
