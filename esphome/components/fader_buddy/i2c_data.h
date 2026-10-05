@@ -194,7 +194,10 @@
 
 // The idle time a REG_IDLE_DURATION write of these two bytes selects.
 static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
-  return (uint16_t)(((uint16_t)high << 8) | low);
+  uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
+  if (ms < IDLE_DURATION_MIN_MS) return IDLE_DURATION_MIN_MS;
+  if (ms > IDLE_DURATION_MAX_MS) return IDLE_DURATION_MAX_MS;
+  return ms;
 }
 
 /*

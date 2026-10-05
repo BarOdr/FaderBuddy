@@ -47,6 +47,16 @@ for production purposes.
 
 ## Firmware (ATtiny1616)
 
+### Unreleased
+
+- `REG_IDLE_DURATION` (0x13) sets how long a fader must be still, with its
+  touch released, before it goes idle and accepts position writes again. It
+  was a fixed second; a host can now choose 100-5000 ms. The default is still
+  1000 ms and the value is not stored, so a host that wants another one writes
+  it after every reset. Firmware without the register reads back 0xFFFF.
+- Touch sensing recovers from a failed PTC calibration instead of staying dead
+  until a power cycle.
+
 ### 1.5
 
 - Haptics (detents and magnetic ends) now run through the same control law as
