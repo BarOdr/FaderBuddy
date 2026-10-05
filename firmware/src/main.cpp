@@ -1322,6 +1322,13 @@ void process_i2c_requests() {
 
   // Applied here, with interrupts off, so the request ISR never reads half of it.
   if (i2c_idle_duration_write != 0) {
+    // An idle fader went idle with input_last_change_millis at least the old
+    // time ago (forced idle sets it exactly that far back). A longer time
+    // would make it look recently moved and wake it with no hand on it, so
+    // move the mark back by the difference.
+    if (get_mode() == Mode::MODE_INPUT_IDLE && i2c_idle_duration_write > idle_duration_ms) {
+      input_last_change_millis -= i2c_idle_duration_write - idle_duration_ms;
+    }
     idle_duration_ms = i2c_idle_duration_write;
     i2c_idle_duration_write = 0;
   }
