@@ -9,8 +9,32 @@
 #include "touch_inject.h"
 
 static TouchSources t;
+static bool fw_acted;      // the touch the fader last acted on (STATE_TOUCH), as main.cpp keeps it
+static uint32_t fw_now;  // the time of the last call, for sensor events
 
-void setUp() { t = TOUCH_SOURCES_INIT; }
+// The firmware's sequence: change a source, then touch_update() against the
+// touch it last acted on, then act on the effective touch.
+static TouchEdge fw_update(uint32_t now) {
+  fw_now = now;
+  TouchEdge e = touch_update(t, now, fw_acted);
+  fw_acted = touch_effective(t);
+  return e;
+}
+static TouchEdge fw_inject(uint32_t now, uint16_t ms) {
+  touch_inject_write(t, now, ms);
+  return fw_update(now);
+}
+static TouchEdge fw_sense(bool touched) {
+  touch_sensor_event(t, touched);
+  return fw_update(fw_now);
+}
+static TouchEdge fw_tick(uint32_t now) { return fw_update(now); }
+
+void setUp() {
+  t = TOUCH_SOURCES_INIT;
+  fw_acted = false;
+  fw_now = 0;
+}
 void tearDown() {}
 
 static uint16_t wire(uint16_t ms) { return debug_touch_ms_from_wire((uint8_t)(ms >> 8), (uint8_t)ms); }
@@ -43,120 +67,120 @@ void test_bound_is_two_seconds_and_below_the_absent_register_value() {
 void test_nothing_touched_at_start() {
   TEST_ASSERT_FALSE(touch_effective(t));
   TEST_ASSERT_EQUAL_UINT16(0, touch_inject_remaining(t, 1000));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, 1000));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(1000));
 }
 
 void test_write_starts_a_touch_with_a_detect_edge() {
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, touch_inject_write(t, 1000, 500));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, fw_inject(1000, 500));
   TEST_ASSERT_TRUE(touch_effective(t));
   TEST_ASSERT_EQUAL_UINT16(500, touch_inject_remaining(t, 1000));
   TEST_ASSERT_EQUAL_UINT16(200, touch_inject_remaining(t, 1300));
 }
 
 void test_hold_expires_by_itself_without_refresh() {
-  touch_inject_write(t, 1000, 500);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, 1499));
+  fw_inject(1000, 500);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(1499));
   TEST_ASSERT_TRUE(touch_effective(t));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 1500));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(1500));
   TEST_ASSERT_FALSE(touch_effective(t));
   TEST_ASSERT_EQUAL_UINT16(0, touch_inject_remaining(t, 1500));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, 1501));  // released once
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(1501));  // released once
 }
 
 void test_late_tick_still_ends_the_hold() {
   // A slow loop pass must not keep the fader touched: the first tick after the
   // time is up ends it, however late, and the remaining time never goes negative.
-  touch_inject_write(t, 1000, 100);
+  fw_inject(1000, 100);
   TEST_ASSERT_EQUAL_UINT16(0, touch_inject_remaining(t, 5000));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 5000));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(5000));
 }
 
 void test_hold_survives_a_millis_wrap() {
   uint32_t start = 0xFFFFFF00UL;
-  touch_inject_write(t, start, 1000);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, start + 999));  // wrapped past 0
+  fw_inject(start, 1000);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(start + 999));  // wrapped past 0
   TEST_ASSERT_EQUAL_UINT16(1, touch_inject_remaining(t, start + 999));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, start + 1000));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(start + 1000));
 }
 
 void test_rewrite_restarts_the_time_without_a_new_edge() {
-  touch_inject_write(t, 1000, 500);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_write(t, 1400, 500));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, 1500));
+  fw_inject(1000, 500);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_inject(1400, 500));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(1500));
   TEST_ASSERT_EQUAL_UINT16(400, touch_inject_remaining(t, 1500));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 1900));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(1900));
 }
 
 void test_rewrite_can_shorten_the_hold() {
-  touch_inject_write(t, 1000, 2000);
-  touch_inject_write(t, 1100, 10);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 1110));
+  fw_inject(1000, 2000);
+  fw_inject(1100, 10);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(1110));
 }
 
 void test_write_of_zero_releases_now() {
-  touch_inject_write(t, 1000, 500);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_write(t, 1100, 0));
+  fw_inject(1000, 500);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_inject(1100, 0));
   TEST_ASSERT_FALSE(touch_effective(t));
   TEST_ASSERT_EQUAL_UINT16(0, touch_inject_remaining(t, 1100));
 }
 
 void test_write_of_zero_without_a_hold_does_nothing() {
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_write(t, 1000, 0));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_inject(1000, 0));
   TEST_ASSERT_FALSE(touch_effective(t));
 }
 
 void test_hold_longer_than_the_bound_is_cut_to_the_bound() {
   // Defence in depth: even a caller that skipped the wire decoding cannot hold longer.
-  touch_inject_write(t, 1000, 0xFFFF);
+  fw_inject(1000, 0xFFFF);
   TEST_ASSERT_EQUAL_UINT16(DEBUG_TOUCH_MAX_MS, touch_inject_remaining(t, 1000));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 1000 + DEBUG_TOUCH_MAX_MS));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(1000 + DEBUG_TOUCH_MAX_MS));
 }
 
 // --- OR with the sensed touch ----------------------------------------------
 
 void test_sensor_alone_behaves_as_before() {
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, touch_sensor_event(t, true));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, fw_sense(true));
   TEST_ASSERT_TRUE(touch_effective(t));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_sensor_event(t, false));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_sense(false));
   TEST_ASSERT_FALSE(touch_effective(t));
 }
 
 void test_injected_release_never_masks_a_real_touch() {
-  touch_sensor_event(t, true);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_write(t, 1000, 100));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_tick(t, 1100));  // hold ends, hand still there
+  fw_sense(true);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_inject(1000, 100));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_tick(1100));  // hold ends, hand still there
   TEST_ASSERT_TRUE(touch_effective(t));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_inject_write(t, 1200, 0));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_inject(1200, 0));
   TEST_ASSERT_TRUE(touch_effective(t));
 }
 
 void test_sensor_release_under_a_hold_keeps_the_touch() {
-  touch_inject_write(t, 1000, 500);
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_sensor_event(t, true));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_sensor_event(t, false));
+  fw_inject(1000, 500);
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_sense(true));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_sense(false));
   TEST_ASSERT_TRUE(touch_effective(t));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, touch_inject_tick(t, 1500));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_RELEASE, fw_tick(1500));
 }
 
 void test_touch_already_held_keeps_its_start_time() {
   // The 50 ms touch override counts from the first edge. A second source
   // joining an existing touch must not produce another DETECT, which would
   // restart that count and delay the override.
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, touch_inject_write(t, 1000, 500));
-  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, touch_sensor_event(t, true));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_DETECT, fw_inject(1000, 500));
+  TEST_ASSERT_EQUAL(TOUCH_EDGE_NONE, fw_sense(true));
 }
 
 // --- Haptics and STATE -----------------------------------------------------
 
 void test_haptics_never_driven_by_an_injection_alone() {
   TEST_ASSERT_TRUE(touch_haptics_allowed(t));  // no touch: unchanged behaviour (input movement)
-  touch_inject_write(t, 1000, 500);
+  fw_inject(1000, 500);
   TEST_ASSERT_FALSE(touch_haptics_allowed(t));
-  touch_sensor_event(t, true);
+  fw_sense(true);
   TEST_ASSERT_TRUE(touch_haptics_allowed(t));  // a real hand is there too
-  touch_sensor_event(t, false);
+  fw_sense(false);
   TEST_ASSERT_FALSE(touch_haptics_allowed(t));
-  touch_inject_tick(t, 1500);
+  fw_tick(1500);
   TEST_ASSERT_TRUE(touch_haptics_allowed(t));
 }
 
@@ -164,11 +188,11 @@ void test_state_bits_follow_the_sources() {
   const uint32_t other = 0x0FFFFFFEUL & ~STATE_TOUCH_INJECTED_bm;  // every other used bit set
   TEST_ASSERT_EQUAL_HEX32(other, touch_state_bits(other | STATE_TOUCH_bm | STATE_TOUCH_INJECTED_bm, t));
 
-  touch_inject_write(t, 1000, 500);
+  fw_inject(1000, 500);
   TEST_ASSERT_EQUAL_HEX32(other | STATE_TOUCH_bm | STATE_TOUCH_INJECTED_bm, touch_state_bits(other, t));
 
-  touch_inject_tick(t, 1500);
-  touch_sensor_event(t, true);
+  fw_tick(1500);
+  fw_sense(true);
   TEST_ASSERT_EQUAL_HEX32(other | STATE_TOUCH_bm, touch_state_bits(other, t));
 }
 
@@ -194,8 +218,7 @@ int main() {
   RUN_TEST(test_rewrite_can_shorten_the_hold);
   RUN_TEST(test_write_of_zero_releases_now);
   RUN_TEST(test_write_of_zero_without_a_hold_does_nothing);
-  RUN_TEST(test_hold_longer_than_the_bound_is_cut_to_the_bound);
-  RUN_TEST(test_sensor_alone_behaves_as_before);
+  RUN_TEST(test_hold_longer_than_the_bound_is_cut_to_the_bound);  RUN_TEST(test_sensor_alone_behaves_as_before);
   RUN_TEST(test_injected_release_never_masks_a_real_touch);
   RUN_TEST(test_sensor_release_under_a_hold_keeps_the_touch);
   RUN_TEST(test_touch_already_held_keeps_its_start_time);

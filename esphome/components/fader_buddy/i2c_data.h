@@ -373,7 +373,7 @@ static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
 // The hold a REG_DEBUG_TOUCH write of these two bytes selects (0 = release).
 static inline uint16_t debug_touch_ms_from_wire(uint8_t high, uint8_t low) {
   uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
-  return ms;
+  return ms > DEBUG_TOUCH_MAX_MS ? DEBUG_TOUCH_MAX_MS : ms;
 }
 
 enum Mode : uint8_t {

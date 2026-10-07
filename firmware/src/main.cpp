@@ -24,6 +24,7 @@
 #include "util.h"
 #include "motor_cal.h"
 #include "motor_control.h"
+#include "touch_inject.h"
 
 // App metadata footer for the I2C bootloader host (see BL_APP_META_ADDR):
 // the two bytes at the fixed end-of-flash address, always equal to the same
@@ -185,7 +186,7 @@ uint32_t state = (Mode::MODE_INPUT_IDLE << STATE_MODE_bp);
 // All variables used to pass data between ISR and main loop are prefixed with i2c_
 
 // Main loop -> ISR communication (outgoing state for I2C reads)
-volatile uint32_t i2c_outgoing_state = state;
+volatile uint32_t i2c_outgoing_state = (Mode::MODE_INPUT_IDLE << STATE_MODE_bp);  // same as state; a constant keeps it out of the startup code
 
 // ISR -> Main loop communication (incoming requests from I2C writes)
 volatile bool i2c_clear_error_request = false;
@@ -245,6 +246,9 @@ uint32_t debug_rate_window_start = 0;
 
 uint32_t remote_movement_start = 0;
 uint32_t touch_state_change_millis = 0;
+// The sensed and the injected touch; STATE_TOUCH is their OR (touch_inject.h).
+TouchSources touch_sources = TOUCH_SOURCES_INIT;
+void touch_refresh();
 uint32_t remote_movement_steady_start = 0;
 uint32_t input_last_change_millis = 0;
 // REG_IDLE_DURATION: written only by the main loop (from i2c_idle_duration_write),
@@ -453,6 +457,8 @@ void onI2cRequest() {
       Wire.write(vals, 12);
   } else if (r == REG_IDLE_DURATION) {
       i2c_write_u16(idle_duration_ms);
+  } else if (r == REG_DEBUG_TOUCH) {
+      i2c_write_u16(touch_inject_remaining(touch_sources, millis()));
   } else if (r == REG_ACTIVE_LAYER) {
       Wire.write(active_layer);
   } else if (r == REG_LAYER_TARGET) {
@@ -460,9 +466,7 @@ void onI2cRequest() {
       Wire.write(layer_restore_positions[queried_layer]);
   } else if (r == REG_LAYER_HAPTIC_CONFIG) {
       // Return haptic config for the previously queried layer (16 bits, big-endian)
-      uint16_t config = layer_haptic_configs[queried_layer];
-      Wire.write((config >> 8) & 0xFF);  // High byte
-      Wire.write(config & 0xFF);          // Low byte
+      i2c_write_u16(layer_haptic_configs[queried_layer]);
   } else if (r == REG_FW_VERSION) {
       // Application firmware version (16 bits, big-endian)
       Wire.write((FW_VERSION >> 8) & 0xFF);  // High byte
@@ -524,9 +528,19 @@ void onI2cReceive(int howMany) {
       }
       break;
     case REG_IDLE_DURATION:
-      if (howMany == 3) {  // register + u16 big-endian
+    case REG_DEBUG_TOUCH:
+      // Both are written as register + u16 big-endian; a 1-byte write only
+      // selects the register for a read. One decoding saves flash.
+      if (howMany == 3) {
         uint8_t high = Wire.read();
-        i2c_idle_duration_write = idle_duration_from_wire(high, Wire.read());
+        uint8_t low = Wire.read();
+        if (current_register == REG_IDLE_DURATION) {
+          i2c_idle_duration_write = idle_duration_from_wire(high, low);
+        } else {
+          // Applied here: only this ISR writes inject_until, and the main
+          // loop reads touch_sources with interrupts off (touch_refresh).
+          touch_inject_write(touch_sources, millis(), debug_touch_ms_from_wire(high, low));
+        }
       } else {
         while (Wire.available()) Wire.read();
       }
@@ -1095,7 +1109,11 @@ void motor_update() {
 
         int16_t limit = get_strength_max_pwm((haptic_config & HAPTIC_DETENT_STRENGTH_bm) >> HAPTIC_DETENT_STRENGTH_bp);
 
-        if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
+        if (!touch_haptics_allowed(touch_sources)) {
+          // The only touch is an injected one (REG_DEBUG_TOUCH): no hand to
+          // feel the haptics, and an injection must never start the motor.
+          motor_coast();
+        } else if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
           // Magnetic endpoints - pull toward calibration limits when near
           if (input_ewma < input_calib_min + HAPTIC_MAGNET_RANGE) {
             haptic_pull(input_calib_min, limit);
@@ -1272,8 +1290,11 @@ void enter_bootloader_now() {
   // Stop the motor so it doesn't keep driving across the reset.
   TCA0.SPLIT.HCMP1 = 0;
   TCA0.SPLIT.HCMP2 = 0;
-  digitalWrite(PIN_MOTOR_A, LOW);
-  digitalWrite(PIN_MOTOR_B, LOW);
+  // Both pins low from the port, then released from the timer: what the two
+  // digitalWrite(LOW) calls did, the same order as the coast in
+  // motor_set(), without linking digitalWrite() (~160 bytes).
+  VPORTA.OUT &= ~(MOTOR_A_bm | MOTOR_B_bm);
+  TCA0.SPLIT.CTRLB = 0;
 
   BL_ENTRY_TOKEN = BL_ENTRY_TOKEN_MAGIC;
   _PROTECTED_WRITE(RSTCTRL.SWRR, RSTCTRL_SWRE_bm);  // software reset (CCP IOREG protected)
@@ -1465,6 +1486,10 @@ void loop() {
   // Process any I2C requests that were queued by ISR callbacks
   process_i2c_requests();
 
+  // Applies an injection written just now, and ends one whose time is up by
+  // itself, with no host refresh.
+  touch_refresh();
+
   // ptc_touch latches a failed calibration (timeout or compensation out of
   // range) in state.error and then skips the node for good; its recal request
   // doesn't clear the flag. Seen on 1-2 of 8 boards at power-up, leaving the
@@ -1529,24 +1554,27 @@ void loop() {
 
 }
 
-// callback that is called by ptc_process at different points to ease user interaction
-void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
-  if (PTC_CB_EVENT_TOUCH_DETECT == eventType) {
-    // MySerial.print("node touched:");
-    // MySerial.println(ptc_get_node_id(node));
-
-    // touch = true;
-    touch_state_change_millis = millis();
-    state |= STATE_TOUCH_bm;
+// One path for every change of the effective touch, sensed or injected, so the
+// touch override, the idle time and tap detection see an injected touch exactly
+// as they see a finger. Also refreshes STATE_TOUCH_INJECTED when nothing changed.
+void touch_refresh() {
+  uint32_t now = millis();  // one read for the whole edge saves flash
+  // Interrupts off: the receive ISR writes touch_sources (REG_DEBUG_TOUCH), and
+  // the edge and STATE must come from one view of it, or an edge is lost.
+  noInterrupts();
+  TouchEdge edge = touch_update(touch_sources, now, (state & STATE_TOUCH_bm) != 0);
+  state = touch_state_bits(state, touch_sources);
+  interrupts();
+  if (TOUCH_EDGE_DETECT == edge) {
+    touch_state_change_millis = now;
 
     // Tap detection
     if (tap_state == TAP_NONE) {
       // First tap touch detected
-      tap_timestamp = millis();
+      tap_timestamp = now;
       tap_position_start = ADC1.RES;  // Store raw ADC value (no EWMA latency)
       tap_state = TAP_FIRST_PRESSED;
     } else if (tap_state == TAP_WAITING_FOR_DOUBLE) {
-      uint32_t now = millis();
       if (now - tap_timestamp <= DOUBLE_TAP_MAX_INTERVAL &&
           tap_position_delta() <= TAP_MAX_MOVEMENT) {
         tap_timestamp = now;
@@ -1556,17 +1584,11 @@ void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
         reset_tap_detection();
       }
     }
-  } else if (PTC_CB_EVENT_TOUCH_RELEASE == eventType) {
-    // MySerial.print("node released:");
-    // MySerial.println(ptc_get_node_id(node));
-
-    // touch = false;
-    touch_state_change_millis = millis();
-    state &= ~STATE_TOUCH_bm;
+  } else if (TOUCH_EDGE_RELEASE == edge) {
+    touch_state_change_millis = now;
 
     // Tap detection: validate tap on release
     if (tap_state == TAP_FIRST_PRESSED || tap_state == TAP_SECOND_PRESSED) {
-      uint32_t now = millis();
       uint32_t tap_duration = now - tap_timestamp;
 
       // Validate tap duration and movement
@@ -1601,6 +1623,14 @@ void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
         reset_tap_detection();
       }
     }
+  }
+}
+
+// callback that is called by ptc_process at different points to ease user interaction
+void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
+  if (PTC_CB_EVENT_TOUCH_DETECT == eventType || PTC_CB_EVENT_TOUCH_RELEASE == eventType) {
+    touch_sensor_event(touch_sources, PTC_CB_EVENT_TOUCH_DETECT == eventType);
+    touch_refresh();
   } else if (PTC_CB_EVENT_CONV_SELF_CMPL == eventType) {
     // Do more complex things here
   } else if (PTC_CB_EVENT_CONV_CALIB & eventType) {
