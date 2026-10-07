@@ -73,6 +73,9 @@ static inline TouchEdge touch_update(TouchSources &t, uint32_t now, bool was_tou
 // an injection must never start a motor.
 static inline bool touch_haptics_allowed(const TouchSources &t) { return t.sensed || !t.injected; }
 
+// The fader went from INPUT_ACTIVE to INPUT_IDLE.
+static inline void touch_went_idle(TouchSources &t) { (void)t; }
+
 // STATE with its touch bits taken from the sources: STATE_TOUCH = effective
 // touch, STATE_TOUCH_INJECTED = hold active. Every other bit is kept.
 static inline uint32_t touch_state_bits(uint32_t state, const TouchSources &t) {

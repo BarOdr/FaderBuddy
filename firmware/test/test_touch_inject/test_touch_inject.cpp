@@ -180,7 +180,58 @@ void test_haptics_never_driven_by_an_injection_alone() {
   TEST_ASSERT_TRUE(touch_haptics_allowed(t));  // a real hand is there too
   fw_sense(false);
   TEST_ASSERT_FALSE(touch_haptics_allowed(t));
+}
+
+void test_haptics_stay_blocked_after_an_injected_hold_ends() {
+  // Gate 2 B1: after the hold ends the fader stays INPUT_ACTIVE for the idle
+  // time with no touch at all. Haptics there would drive the motor with no
+  // hand, started by the injection. They stay off until the fader goes idle.
+  fw_inject(1000, 500);
   fw_tick(1500);
+  TEST_ASSERT_FALSE(touch_effective(t));
+  TEST_ASSERT_FALSE(touch_haptics_allowed(t));
+  touch_went_idle(t);
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));
+}
+
+void test_injection_released_by_a_zero_write_also_keeps_haptics_blocked() {
+  fw_inject(1000, 500);
+  fw_inject(1100, 0);
+  TEST_ASSERT_FALSE(touch_haptics_allowed(t));
+}
+
+void test_hand_leaving_an_injected_hold_blocks_haptics_until_idle() {
+  fw_sense(true);
+  fw_inject(1000, 500);
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));  // hand is there
+  fw_sense(false);
+  fw_tick(1500);
+  TEST_ASSERT_FALSE(touch_haptics_allowed(t));
+  touch_went_idle(t);
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));
+}
+
+void test_a_real_touch_lifts_the_haptics_block() {
+  fw_inject(1000, 500);
+  fw_tick(1500);
+  fw_sense(true);
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));
+  fw_sense(false);  // a hand, not an injection, made this touch
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));
+}
+
+void test_going_idle_during_a_hold_does_not_lift_the_block() {
+  fw_inject(1000, 500);
+  touch_went_idle(t);
+  TEST_ASSERT_FALSE(touch_haptics_allowed(t));
+}
+
+void test_injection_under_a_real_hand_does_not_block_haptics_after_it() {
+  fw_sense(true);
+  fw_inject(1000, 500);
+  fw_tick(1500);
+  TEST_ASSERT_TRUE(touch_haptics_allowed(t));
+  fw_sense(false);
   TEST_ASSERT_TRUE(touch_haptics_allowed(t));
 }
 
@@ -223,6 +274,12 @@ int main() {
   RUN_TEST(test_sensor_release_under_a_hold_keeps_the_touch);
   RUN_TEST(test_touch_already_held_keeps_its_start_time);
   RUN_TEST(test_haptics_never_driven_by_an_injection_alone);
+  RUN_TEST(test_haptics_stay_blocked_after_an_injected_hold_ends);
+  RUN_TEST(test_injection_released_by_a_zero_write_also_keeps_haptics_blocked);
+  RUN_TEST(test_hand_leaving_an_injected_hold_blocks_haptics_until_idle);
+  RUN_TEST(test_a_real_touch_lifts_the_haptics_block);
+  RUN_TEST(test_going_idle_during_a_hold_does_not_lift_the_block);
+  RUN_TEST(test_injection_under_a_real_hand_does_not_block_haptics_after_it);
   RUN_TEST(test_state_bits_follow_the_sources);
   RUN_TEST(test_injected_bit_is_bit_30_and_clear_of_the_other_fields);
   return UNITY_END();
