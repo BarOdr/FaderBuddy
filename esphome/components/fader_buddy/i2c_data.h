@@ -128,6 +128,8 @@
  * -----|---------------------|---------|------|------------
  * 0xF2 | DEBUG_GAINS         | W       | u8[3]| Runtime gain override (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
+ * 0xF3 | DEBUG_TOUCH         | R/W     | u16  | Injected touch hold in ms, for automated tests (all builds, see below)
+ * -----|---------------------|---------|------|------------
  *
  * Protocol:
  * - Simple registers:
@@ -272,8 +274,11 @@ static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
 /*
  * Debug registers live at the top of the address space, not immediately after
  * the production registers, so that adding a real register never has to step
- * over them or leave a hole where they used to be. They are compiled out of
- * production builds entirely, so nothing on a shipped board answers here.
+ * over them or leave a hole where they used to be. 0xF0-0xF2 are compiled out
+ * of production builds entirely, so nothing on a shipped board answers there.
+ * 0xF3 (DEBUG_TOUCH) is the exception: it is in every build, because the only
+ * thing it can do is make the fader behave as if a hand were on it, which
+ * stops a motor and never starts one.
  */
 #define REG_DEBUG_DRIVE 0xF0  // Open-loop motor drive (W, [flags, duty]); DEBUG_DRIVE builds only
 
@@ -333,6 +338,49 @@ static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
 #define DEBUG_GAIN_CALIB_MIN   (8)  // override calib_min (RAM only, not saved)
 #define DEBUG_GAIN_CALIB_MAX   (9)  // override calib_max (RAM only, not saved)
 
+/*
+ * REG_DEBUG_TOUCH (0xF3) - read/write, u16 big-endian, milliseconds. In every
+ * build (not only DEBUG_DRIVE builds).
+ *
+ * Touch injection for automated motor-safety tests: a host makes the fader
+ * behave as if a hand were on its cap, without a hand.
+ *
+ *   Write [0xF3, ms_hi, ms_lo]: hold the touch for ms milliseconds, restarting
+ *     the time on every write. ms is clamped to DEBUG_TOUCH_MAX_MS, so a host
+ *     that dies after a write cannot leave the fader "touched" for longer than
+ *     that: the hold ends by itself, with no refresh. A write of 0 releases the
+ *     hold now. A write of any other length is discarded.
+ *   Read 0xF3: the remaining hold in ms (0 when none). Firmware without the
+ *     register does not answer and reads back 0xFFFF, which is above
+ *     DEBUG_TOUCH_MAX_MS; that is how a host detects it.
+ *
+ * The injected touch and the sensed touch are two sources; the touch the
+ * fader acts on (STATE_TOUCH) is their OR, so an injected release never masks
+ * a real hand. Changes of that OR go through the same path as the sensor's,
+ * so the touch override of a remote move, the idle time and tap detection see
+ * what a finger would produce. One difference, on purpose: once an injection
+ * has touched the fader with no hand on it, haptics do not drive the motor
+ * until the fader goes idle or a real hand touches it, so an injection can
+ * stop a motor but never start one, during the hold or in the idle time after.
+ *
+ * Tap detection sees injected holds too: a hold of up to 200 ms is a tap, and
+ * two such holds within 200 ms are a double tap (DOUBLE_TAP_NONCE changes and
+ * the fader goes idle). A test that does not want that holds longer.
+ *
+ * STATE_TOUCH_INJECTED (STATE bit 30) is set while a hold is active, so a
+ * host can tell a synthetic touch from a real one in every STATE sample.
+ * Always 0 from firmware without the register. Not stored: a reset ends any
+ * hold.
+ */
+#define REG_DEBUG_TOUCH 0xF3
+#define DEBUG_TOUCH_MAX_MS (2000)
+
+// The hold a REG_DEBUG_TOUCH write of these two bytes selects (0 = release).
+static inline uint16_t debug_touch_ms_from_wire(uint8_t high, uint8_t low) {
+  uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
+  return ms > DEBUG_TOUCH_MAX_MS ? DEBUG_TOUCH_MAX_MS : ms;
+}
+
 enum Mode : uint8_t {
   MODE_REMOTE_MOVEMENT_IN_PROGRESS = 0,
   MODE_INPUT_ACTIVE                = 1,
@@ -386,6 +434,13 @@ enum HapticMode : uint8_t {
 #define STATE_DOUBLE_TAP_NONCE_bp   (28)
 #define STATE_DOUBLE_TAP_NONCE_bs   (2)
 #define STATE_DOUBLE_TAP_NONCE_bm   (((1UL << STATE_DOUBLE_TAP_NONCE_bs) - 1) << STATE_DOUBLE_TAP_NONCE_bp)
+
+// Touch injected: 1 bit at position 30, set while a REG_DEBUG_TOUCH hold is
+// active (bit 30 and 31 were unused before; firmware without the register
+// always reports 0 here)
+#define STATE_TOUCH_INJECTED_bp     (30)
+#define STATE_TOUCH_INJECTED_bs     (1)
+#define STATE_TOUCH_INJECTED_bm     (((1UL << STATE_TOUCH_INJECTED_bs) - 1) << STATE_TOUCH_INJECTED_bp)
 
 /*
  * Haptic Configuration Bitfields (16-bit format - PROTOCOL VERSION 5+)

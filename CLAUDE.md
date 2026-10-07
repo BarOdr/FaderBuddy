@@ -326,7 +326,9 @@ The FaderBuddy acts as an I2C peripheral with a configurable address (base 0x20 
 - **Debug registers** (0xF0-0xF2): open-loop drive, control-loop internals, and runtime gain
   overrides. Compiled out unless `DEBUG_DRIVE` is defined, so they are absent from
   production builds. They sit at the top of the address space deliberately, so new
-  production registers can keep growing from 0x10 without a hole
+  production registers can keep growing from 0x10 without a hole. 0xF3 (DEBUG_TOUCH, touch
+  injection for automated tests, bounded to 2000 ms) is the exception and is in every build:
+  it can only make the fader act as if touched, which stops a motor and never starts one
 
 Refer to `i2c_data.h` for complete register map and bit field definitions.
 
