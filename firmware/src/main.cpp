@@ -248,7 +248,7 @@ uint32_t remote_movement_start = 0;
 uint32_t touch_state_change_millis = 0;
 // The sensed and the injected touch; STATE_TOUCH is their OR (touch_inject.h).
 TouchSources touch_sources = TOUCH_SOURCES_INIT;
-void touch_refresh();
+void touch_refresh(int8_t sensed);
 uint32_t remote_movement_steady_start = 0;
 uint32_t input_last_change_millis = 0;
 // REG_IDLE_DURATION: written only by the main loop (from i2c_idle_duration_write),
@@ -1102,6 +1102,11 @@ void motor_update() {
           pending_report_on_idle = false;
           increment_position_nonce();
         }
+        // Haptics blocked by an injection end here (Gate 2 B1). Other ways
+        // into idle leave the block on until a real touch, which only coasts.
+        noInterrupts();
+        touch_went_idle(touch_sources);
+        interrupts();
         set_mode(Mode::MODE_INPUT_IDLE);
       } else {
         // Haptics - extract current mode from haptic_config
@@ -1110,8 +1115,9 @@ void motor_update() {
         int16_t limit = get_strength_max_pwm((haptic_config & HAPTIC_DETENT_STRENGTH_bm) >> HAPTIC_DETENT_STRENGTH_bp);
 
         if (!touch_haptics_allowed(touch_sources)) {
-          // The only touch is an injected one (REG_DEBUG_TOUCH): no hand to
-          // feel the haptics, and an injection must never start the motor.
+          // An injection touched the fader with no hand (REG_DEBUG_TOUCH),
+          // now or earlier in this active period: no hand to feel the
+          // haptics, and an injection must never start the motor.
           motor_coast();
         } else if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
           // Magnetic endpoints - pull toward calibration limits when near
@@ -1488,7 +1494,7 @@ void loop() {
 
   // Applies an injection written just now, and ends one whose time is up by
   // itself, with no host refresh.
-  touch_refresh();
+  touch_refresh(TOUCH_SENSED_NO_EVENT);
 
   // ptc_touch latches a failed calibration (timeout or compensation out of
   // range) in state.error and then skips the node for good; its recal request
@@ -1557,11 +1563,14 @@ void loop() {
 // One path for every change of the effective touch, sensed or injected, so the
 // touch override, the idle time and tap detection see an injected touch exactly
 // as they see a finger. Also refreshes STATE_TOUCH_INJECTED when nothing changed.
-void touch_refresh() {
+// sensed: a PTC event (1 detect, 0 release) or TOUCH_SENSED_NO_EVENT.
+void touch_refresh(int8_t sensed) {
   uint32_t now = millis();  // one read for the whole edge saves flash
   // Interrupts off: the receive ISR writes touch_sources (REG_DEBUG_TOUCH), and
-  // the edge and STATE must come from one view of it, or an edge is lost.
+  // the sensor event, edge and STATE must come from one view of it, or an
+  // edge or the haptics block is lost.
   noInterrupts();
+  if (sensed >= 0) touch_sensor_event(touch_sources, sensed);
   TouchEdge edge = touch_update(touch_sources, now, (state & STATE_TOUCH_bm) != 0);
   state = touch_state_bits(state, touch_sources);
   interrupts();
@@ -1629,8 +1638,7 @@ void touch_refresh() {
 // callback that is called by ptc_process at different points to ease user interaction
 void ptc_event_callback(const ptc_cb_event_t eventType, cap_sensor_t* node) {
   if (PTC_CB_EVENT_TOUCH_DETECT == eventType || PTC_CB_EVENT_TOUCH_RELEASE == eventType) {
-    touch_sensor_event(touch_sources, PTC_CB_EVENT_TOUCH_DETECT == eventType);
-    touch_refresh();
+    touch_refresh(PTC_CB_EVENT_TOUCH_DETECT == eventType);
   } else if (PTC_CB_EVENT_CONV_SELF_CMPL == eventType) {
     // Do more complex things here
   } else if (PTC_CB_EVENT_CONV_CALIB & eventType) {

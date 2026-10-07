@@ -33,15 +33,24 @@ struct TouchSources {
   bool sensed;            // last PTC event: true after DETECT, false after RELEASE
   bool injected;          // a REG_DEBUG_TOUCH hold is active
   uint16_t inject_until;  // low 16 bits of millis() when the hold ends
+  bool haptics_blocked;   // an injection touched the fader with no hand on it
 };
 
-static const TouchSources TOUCH_SOURCES_INIT = {false, false, 0};
+static const int8_t TOUCH_SENSED_NO_EVENT = -1;  // touch_refresh(): no PTC event
+
+static const TouchSources TOUCH_SOURCES_INIT = {false, false, 0, false};
 
 // The touch the fader acts on.
 static inline bool touch_effective(const TouchSources &t) { return t.sensed || t.injected; }
 
 // The PTC reported a touch (true) or a release (false).
-static inline void touch_sensor_event(TouchSources &t, bool touched) { t.sensed = touched; }
+// A hand arriving lifts the haptics block; a hand leaving an injected hold sets
+// it. Call with interrupts off: the receive ISR writes the injection.
+static inline void touch_sensor_event(TouchSources &t, bool touched) {
+  t.sensed = touched;
+  if (touched) t.haptics_blocked = false;
+  else if (t.injected) t.haptics_blocked = true;
+}
 
 // A REG_DEBUG_TOUCH write, already decoded by debug_touch_ms_from_wire():
 // 0 releases the hold, anything else (re)starts it at now. Longer than
@@ -50,6 +59,7 @@ static inline void touch_inject_write(TouchSources &t, uint32_t now, uint16_t ms
   if (ms > DEBUG_TOUCH_MAX_MS) ms = DEBUG_TOUCH_MAX_MS;
   t.injected = (ms != 0);
   t.inject_until = (uint16_t)((uint16_t)now + ms);
+  if (t.injected && !t.sensed) t.haptics_blocked = true;
 }
 
 // What a REG_DEBUG_TOUCH read reports: the remaining hold in ms, 0 when none.
@@ -69,12 +79,17 @@ static inline TouchEdge touch_update(TouchSources &t, uint32_t now, bool was_tou
   return touched ? TOUCH_EDGE_DETECT : TOUCH_EDGE_RELEASE;
 }
 
-// Haptics may drive the motor only under a touch that is not injection alone:
-// an injection must never start a motor.
-static inline bool touch_haptics_allowed(const TouchSources &t) { return t.sensed || !t.injected; }
+// Haptics may drive the motor only when no injection touched the fader without
+// a hand since it last went idle: an injection must never start a motor. That
+// covers the hold itself and the idle time after it, when the fader is still
+// INPUT_ACTIVE with nothing touching it. A real touch lifts the block.
+static inline bool touch_haptics_allowed(const TouchSources &t) { return t.sensed || !t.haptics_blocked; }
 
-// The fader went from INPUT_ACTIVE to INPUT_IDLE.
-static inline void touch_went_idle(TouchSources &t) { (void)t; }
+// The fader went from INPUT_ACTIVE to INPUT_IDLE: the block ends, unless a new
+// hold has started meanwhile. Call with interrupts off.
+static inline void touch_went_idle(TouchSources &t) {
+  if (!t.injected) t.haptics_blocked = false;
+}
 
 // STATE with its touch bits taken from the sources: STATE_TOUCH = effective
 // touch, STATE_TOUCH_INJECTED = hold active. Every other bit is kept.

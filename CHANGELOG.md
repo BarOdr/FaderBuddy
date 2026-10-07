@@ -60,8 +60,8 @@ for production purposes.
   automated tests: a write holds the touch for up to 2000 ms (0 releases), the
   hold ends by itself without a refresh, and a read returns the time left.
   STATE bit 30 is set while a hold is active. It can stop a motor but never
-  start one: haptics do not drive under a touch that is only injected. In every
-  build. Firmware without the register reads back 0xFFFF.
+  start one: once an injection touched the fader with no hand, haptics stay off
+  until the fader goes idle or a real hand touches it. In every build. Firmware without the register reads back 0xFFFF.
 
 ### 1.5
 

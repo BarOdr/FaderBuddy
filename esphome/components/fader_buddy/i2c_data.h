@@ -358,9 +358,14 @@ static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
  * fader acts on (STATE_TOUCH) is their OR, so an injected release never masks
  * a real hand. Changes of that OR go through the same path as the sensor's,
  * so the touch override of a remote move, the idle time and tap detection see
- * what a finger would produce. One difference, on purpose: haptics do not
- * drive the motor while the only touch is an injected one, so an injection
- * can stop a motor but never start one.
+ * what a finger would produce. One difference, on purpose: once an injection
+ * has touched the fader with no hand on it, haptics do not drive the motor
+ * until the fader goes idle or a real hand touches it, so an injection can
+ * stop a motor but never start one, during the hold or in the idle time after.
+ *
+ * Tap detection sees injected holds too: a hold of up to 200 ms is a tap, and
+ * two such holds within 200 ms are a double tap (DOUBLE_TAP_NONCE changes and
+ * the fader goes idle). A test that does not want that holds longer.
  *
  * STATE_TOUCH_INJECTED (STATE bit 30) is set while a hold is active, so a
  * host can tell a synthetic touch from a real one in every STATE sample.
