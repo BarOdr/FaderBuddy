@@ -54,8 +54,6 @@ for production purposes.
   was a fixed second; a host can now choose 100-5000 ms. The default is still
   1000 ms and the value is not stored, so a host that wants another one writes
   it after every reset. Firmware without the register reads back 0xFFFF.
-- Touch sensing recovers from a failed PTC calibration instead of staying dead
-  until a power cycle.
 
 ### 1.5
 
