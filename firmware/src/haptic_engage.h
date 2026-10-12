@@ -19,14 +19,21 @@
 #include <stdint.h>
 
 // ADC counts past the deadband over which a haptic pull fades in to the full
-// control-law drive. Tuned on the Entity mule's MF60T faders.
-#define HAPTIC_SOFT_BAND (16.0f)
+// control-law drive, as a power of two: the app has about 100 bytes of flash
+// left, so the fade is a shift, not a float division. To be tuned on the
+// Entity mule's MF60T faders.
+#define HAPTIC_SOFT_BAND_SHIFT (4)
+#define HAPTIC_SOFT_BAND (1 << HAPTIC_SOFT_BAND_SHIFT)
 
-// The drive a haptic pull applies for `error` (target - position, ADC counts),
-// given `drive`, the control law's output already capped at the haptic
-// strength: 0 within `deadband`, the full `drive` from `deadband + soft_band`
-// on, and in between `drive` scaled by how far past the deadband the error is.
-// The sign of `drive` is kept, so the law's damping still acts.
-static inline int16_t haptic_engage(float error, float deadband, float soft_band, int16_t drive) {
-  return drive;
+// The drive a haptic pull applies for `error` (target - position, whole ADC
+// counts), given `drive`, the control law's output already capped at the
+// haptic strength (at most 254 either way): 0 within `deadband`, the full
+// `drive` from `deadband + HAPTIC_SOFT_BAND` on, and in between `drive` scaled
+// by the counts past the deadband. The sign of `drive` is kept, so the law's
+// damping still acts.
+static inline int16_t haptic_engage(int16_t error, int16_t deadband, int16_t drive) {
+  int16_t past = (error < 0 ? -error : error) - deadband;
+  if (past <= 0) return 0;
+  if (past >= HAPTIC_SOFT_BAND) return drive;
+  return (int16_t)((drive * past) >> HAPTIC_SOFT_BAND_SHIFT);
 }

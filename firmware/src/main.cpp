@@ -25,6 +25,7 @@
 #include "motor_cal.h"
 #include "motor_control.h"
 #include "touch_inject.h"
+#include "haptic_engage.h"
 
 // App metadata footer for the I2C bootloader host (see BL_APP_META_ADDR):
 // the two bytes at the fixed end-of-flash address, always equal to the same
@@ -914,16 +915,14 @@ static float control_law(float error, float max_velocity) {
 // control law asks for less speed the closer the carriage gets, a released
 // fader decelerates into the detent instead of overshooting it; the user
 // holding it just feels the pull saturate at the cap. Coasts in the deadband so
-// the fader is free at rest.
+// the fader is free at rest, and fades in past it (haptic_engage.h) so a finger
+// resting near the detent is not kicked back and forth across the edge.
 static void haptic_pull(float target, int16_t limit) {
   float error = target - input_ewma;
-  int16_t drive = 0;
-  if (error > move_deadband || error < -move_deadband) {
-    drive = (int16_t)control_law(error, MOVE_VEL_UNLIMITED);
-    if (drive > limit) drive = limit;
-    if (drive < -limit) drive = -limit;
-  }
-  motor_set(drive, true, MOTOR_IDLE_COAST);
+  int16_t drive = (int16_t)control_law(error, MOVE_VEL_UNLIMITED);
+  if (drive > limit) drive = limit;
+  if (drive < -limit) drive = -limit;
+  motor_set(haptic_engage((int16_t)error, (int16_t)move_deadband, drive), true, MOTOR_IDLE_COAST);
 }
 
 void motor_update() {
