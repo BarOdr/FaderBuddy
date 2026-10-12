@@ -66,8 +66,8 @@ for production purposes.
   stepping from nothing to breakaway drive at its edge. A finger resting on a
   detent kept nudging the fader across that edge and the motor kicked back each
   time, so the fader trembled under the hand. The detent's held force further
-  out is unchanged; a released fader may settle a few counts off the detent's
-  centre.
+  out is unchanged; a released fader may settle up to about 20 counts off the
+  detent's centre.
 
 ### 1.5
 

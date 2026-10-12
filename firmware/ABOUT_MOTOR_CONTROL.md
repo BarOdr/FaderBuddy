@@ -202,7 +202,9 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   each time, which the hand feels as trembling. Scaling the drive from 0 at the
   edge to full over 16 counts turns the edge into a spring. The price is that a
   released fader can stop short of the detent's centre once the scaled drive
-  falls below breakaway, a few counts at most.
+  falls below breakaway: up to about 20 counts at strength 3, with that weak
+  drive left on until the idle timeout. (The error is truncated to whole
+  counts, so the deadband is effectively 9.)
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed
