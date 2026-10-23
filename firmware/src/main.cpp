@@ -921,8 +921,7 @@ static void haptic_pull(float target, int16_t limit, int16_t half_width) {
   int16_t drive = (int16_t)control_law(error, MOVE_VEL_UNLIMITED);
   if (drive > limit) drive = limit;
   if (drive < -limit) drive = -limit;
-  int16_t e = (int16_t)error;
-  motor_set(haptic_window(e, half_width, haptic_engage(e, (int16_t)move_deadband, drive)), true, MOTOR_IDLE_COAST);
+  motor_set(haptic_shape((int16_t)error, (int16_t)move_deadband, half_width, drive), true, MOTOR_IDLE_COAST);
 }
 
 void motor_update() {

@@ -113,6 +113,37 @@ void test_notch_reaches_full_drive_between_the_fades() {
   TEST_ASSERT_EQUAL_INT16(-KICK, notch(-28, -KICK));
 }
 
+// --- haptic_shape: the single scaling step haptic_pull() applies ---
+
+void test_shape_equals_engage_then_window_for_a_six_unit_notch() {
+  // The bands do not overlap (engaged by 24, fade from 32), so the one-step
+  // shape gives exactly the two fades applied one after the other.
+  for (int e = -HALF - 10; e <= HALF + 10; ++e) {
+    TEST_ASSERT_EQUAL_INT16(notch((int16_t)e, KICK), haptic_shape((int16_t)e, DEADBAND, HALF, KICK));
+    TEST_ASSERT_EQUAL_INT16(notch((int16_t)e, -KICK), haptic_shape((int16_t)e, DEADBAND, HALF, -KICK));
+  }
+}
+
+void test_shape_of_a_narrow_notch_has_no_step_and_is_zero_at_both_ends() {
+  // A 3-unit notch (24 counts): the engage and the window fades overlap.
+  const int16_t narrow = 3 * 8;
+  TEST_ASSERT_EQUAL_INT16(0, haptic_shape(DEADBAND, DEADBAND, narrow, KICK));
+  TEST_ASSERT_EQUAL_INT16(0, haptic_shape(narrow, DEADBAND, narrow, KICK));
+  int16_t previous = 0;
+  int16_t peak = 0;
+  for (int e = narrow + 4; e >= 0; --e) {
+    int16_t d = haptic_shape((int16_t)e, DEADBAND, narrow, KICK);
+    int16_t step = (int16_t)(d > previous ? d - previous : previous - d);
+    TEST_ASSERT_TRUE(step <= KICK / 16 + 1);
+    TEST_ASSERT_TRUE(d >= 0);
+    TEST_ASSERT_TRUE(d < KICK);
+    if (d > peak) peak = d;
+    previous = d;
+  }
+  TEST_ASSERT_TRUE(peak > 0);
+  TEST_ASSERT_TRUE(haptic_shape(-16, DEADBAND, narrow, -KICK) < 0);
+}
+
 // --- config ---
 
 void test_notch_half_width_is_the_count_field_in_units_of_eight() {
@@ -159,6 +190,8 @@ int main() {
   RUN_TEST(test_notch_is_free_at_centre_and_outside);
   RUN_TEST(test_notch_has_no_step_anywhere_across_the_window);
   RUN_TEST(test_notch_reaches_full_drive_between_the_fades);
+  RUN_TEST(test_shape_equals_engage_then_window_for_a_six_unit_notch);
+  RUN_TEST(test_shape_of_a_narrow_notch_has_no_step_and_is_zero_at_both_ends);
   RUN_TEST(test_notch_half_width_is_the_count_field_in_units_of_eight);
   RUN_TEST(test_notch_width_zero_is_rejected);
   RUN_TEST(test_notch_widths_one_to_fifteen_are_accepted);

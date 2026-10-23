@@ -11,8 +11,9 @@
  * outside, as magnet ends leave it free between their end windows. A window
  * that switched from coast to the capped drive at its edge would be a relay,
  * so the drive fades out over the window's outer HAPTIC_NOTCH_FADE counts; the
- * inner soft engage (haptic_engage.h) fades it in past the deadband. The two
- * multiply, so the drive is zero at both ends and has no step anywhere.
+ * inner soft engage (haptic_engage.h) fades it in past the deadband. Both
+ * fades share one scaling step (haptic_shape, the smaller fade wins where they
+ * overlap), so the drive is zero at both ends and has no step anywhere.
  */
 
 #pragma once
@@ -20,15 +21,17 @@
 #include <stdint.h>
 
 #include "shared/i2c_data.h"
+#include "haptic_engage.h"
 
 // The notch half-width is the config's HAPTIC_DETENT_COUNT field in units of
 // 8 ADC counts (1-15: 8-120 counts, about 0.5-7 mm on a 60 mm fader).
 #define HAPTIC_NOTCH_UNIT_SHIFT (3)
 
 // ADC counts at the window's outer edge over which the drive fades out to
-// zero, as a power of two (a shift, not a division: the app has little flash
-// left). To be tuned on the Entity mule's MF60T faders.
-#define HAPTIC_NOTCH_FADE_SHIFT (4)
+// zero. It shares haptic_shape()'s single scaling step with the inner soft
+// engage, so it is the same band (a shift, not a division: the app has little
+// flash left). To be tuned on the Entity mule's MF60T faders.
+#define HAPTIC_NOTCH_FADE_SHIFT HAPTIC_SOFT_BAND_SHIFT
 #define HAPTIC_NOTCH_FADE (1 << HAPTIC_NOTCH_FADE_SHIFT)
 
 // Notch half-width in ADC counts for a haptic config word.
@@ -42,10 +45,8 @@ static inline int16_t haptic_notch_half_width(uint16_t config) {
 // HAPTIC_NOTCH_FADE counts inside the edge inward, and in between `drive`
 // scaled by the counts inside the edge. The sign of `drive` is kept.
 static inline int16_t haptic_window(int16_t error, int16_t half_width, int16_t drive) {
-  int16_t inside = half_width - (error < 0 ? -error : error);
-  if (inside <= 0) return 0;
-  if (inside >= HAPTIC_NOTCH_FADE) return drive;
-  return (int16_t)((drive * inside) >> HAPTIC_NOTCH_FADE_SHIFT);
+  // A deadband of minus one band: the engage fade never acts
+  return haptic_shape(error, -HAPTIC_SOFT_BAND, half_width, drive);
 }
 
 // Whether a layer haptic config word may be stored: detents need a count of
