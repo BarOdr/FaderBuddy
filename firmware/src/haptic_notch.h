@@ -4,6 +4,15 @@
  * configuration word.
  *
  * Pure logic with no hardware access, so it runs in the native_test host tests.
+ *
+ * A single detent (HAPTIC_DETENTS, count 1) pulls to the centre from anywhere
+ * on the travel: a spring, not a notch. The notch pulls only within
+ * half_width counts of the centre and leaves the fader free (coasting)
+ * outside, as magnet ends leave it free between their end windows. A window
+ * that switched from coast to the capped drive at its edge would be a relay,
+ * so the drive fades out over the window's outer HAPTIC_NOTCH_FADE counts; the
+ * inner soft engage (haptic_engage.h) fades it in past the deadband. The two
+ * multiply, so the drive is zero at both ends and has no step anywhere.
  */
 
 #pragma once
@@ -12,25 +21,40 @@
 
 #include "shared/i2c_data.h"
 
+// The notch half-width is the config's HAPTIC_DETENT_COUNT field in units of
+// 8 ADC counts (1-15: 8-120 counts, about 0.5-7 mm on a 60 mm fader).
 #define HAPTIC_NOTCH_UNIT_SHIFT (3)
+
+// ADC counts at the window's outer edge over which the drive fades out to
+// zero, as a power of two (a shift, not a division: the app has little flash
+// left). To be tuned on the Entity mule's MF60T faders.
 #define HAPTIC_NOTCH_FADE_SHIFT (4)
 #define HAPTIC_NOTCH_FADE (1 << HAPTIC_NOTCH_FADE_SHIFT)
 
-// STUB (RED): contract only.
+// Notch half-width in ADC counts for a haptic config word.
 static inline int16_t haptic_notch_half_width(uint16_t config) {
-  (void)config;
-  return 0;
+  return (int16_t)(((config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp) << HAPTIC_NOTCH_UNIT_SHIFT);
 }
 
-// STUB (RED): contract only.
+// The drive within a window of `half_width` counts around the target, for
+// `error` (target - position, whole ADC counts) and `drive` (signed, at most
+// 254 either way): 0 at and beyond the edge, `drive` unchanged from
+// HAPTIC_NOTCH_FADE counts inside the edge inward, and in between `drive`
+// scaled by the counts inside the edge. The sign of `drive` is kept.
 static inline int16_t haptic_window(int16_t error, int16_t half_width, int16_t drive) {
-  (void)error;
-  (void)half_width;
-  return drive;
+  int16_t inside = half_width - (error < 0 ? -error : error);
+  if (inside <= 0) return 0;
+  if (inside >= HAPTIC_NOTCH_FADE) return drive;
+  return (int16_t)((drive * inside) >> HAPTIC_NOTCH_FADE_SHIFT);
 }
 
-// STUB (RED): contract only.
+// Whether a layer haptic config word may be stored: detents need a count of
+// 1-10 and the centre notch a width of 1-15; other modes are not checked (an
+// unknown mode coasts).
 static inline bool haptic_config_valid(uint16_t config) {
-  (void)config;
+  uint8_t mode = (config & HAPTIC_MODE_bm) >> HAPTIC_MODE_bp;
+  uint8_t count = (config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
+  if (mode == HAPTIC_DETENTS) return count >= 1 && count <= 10;
+  if (mode == HAPTIC_CENTRE_NOTCH) return count != 0;
   return true;
 }
