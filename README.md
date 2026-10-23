@@ -227,6 +227,7 @@ The FaderBuddy firmware internally handles the closed loop motor control, presen
   - Smooth operation (no detents)
   - Magnetic endpoints (snap to 0% and 100%)
   - Configurable detents (1-15 positions)
+  - Centre notch (firmware 1.6+): a light pull to the centre only within a window around it (half-width 1-15 units of 8 ADC counts; 6 recommended), free outside
 
 Configuration of a FaderBuddy supports up to 8 virtual "layers", which allow a single fader to be used for multiple purposes (e.g. controlling lamp brightness and fan speed), with the host controller able
 to send a single command to switch to a different layer. Switching layers restores the previous

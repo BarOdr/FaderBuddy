@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (5)
+#define FW_VERSION_MINOR (6)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -72,6 +72,12 @@
 // host, and bumping I2C_PROTOCOL_VERSION for it would trip any host that
 // validates the protocol version strictly.
 #define FW_VERSION_BOOTLOADER_ENTRY (0x0103)  // 1.3
+
+// Minimum firmware version that implements HAPTIC_CENTRE_NOTCH. Older firmware
+// stores the config but coasts on the unknown mode (no pull at all), so a host
+// that needs the notch checks this; no protocol-version bump, as the mode is
+// additive.
+#define FW_VERSION_CENTRE_NOTCH (0x0106)  // 1.6
 
 
 /*
@@ -455,7 +461,15 @@ enum HapticMode : uint8_t {
 #define HAPTIC_MODE_bs              (3)
 #define HAPTIC_MODE_bm              (((1U << HAPTIC_MODE_bs) - 1) << HAPTIC_MODE_bp)
 
-// Detent count: 4 bits at position 3
+// Detent count: 4 bits at position 3. HAPTIC_DETENTS: the number of detents,
+// 1-10. HAPTIC_CENTRE_NOTCH reuses the field as the notch half-width in units
+// of 8 ADC counts, 1-15 (8-120 counts either side of the calibrated
+// midpoint); 0 is rejected like a bad detent count. The notch pulls toward
+// the midpoint only inside that window, fading in past the deadband and out
+// over the window's outer 16 counts, and coasts outside it. With the default
+// deadband (8 counts) a width of 5 or less never reaches full strength and 1
+// never pulls; 6 (48 counts) is the recommended value. Other modes ignore the
+// field.
 #define HAPTIC_DETENT_COUNT_bp      (3)
 #define HAPTIC_DETENT_COUNT_bs      (4)
 #define HAPTIC_DETENT_COUNT_bm      (((1U << HAPTIC_DETENT_COUNT_bs) - 1) << HAPTIC_DETENT_COUNT_bp)

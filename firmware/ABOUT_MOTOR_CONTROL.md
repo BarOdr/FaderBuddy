@@ -185,7 +185,8 @@ unset.
 ## Haptics
 
 Haptics are not a second controller. `haptic_pull()` picks a target - the
-nearest detent, or the calibrated end within `HAPTIC_MAGNET_RANGE` of it -
+nearest detent, the calibrated end within `HAPTIC_MAGNET_RANGE` of it, or the
+calibrated midpoint for the centre notch -
 and hands the error to the same `control_law()` a remote move uses, with no
 speed limit, no stall ramp and no take-up ceiling. Only two things differ:
 
@@ -205,6 +206,19 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   falls below breakaway: up to about 20 counts at strength 3, with that weak
   drive left on until the idle timeout. (The error is truncated to whole
   counts, so the deadband is effectively 9.)
+- **The centre notch acts only within a window** (`HAPTIC_CENTRE_NOTCH`,
+  `haptic_notch.h`). A single detent pulls to the centre from anywhere on the
+  travel, a spring; the notch pulls only within its half-width of the
+  midpoint (the config's count field, in units of 8 counts) and coasts
+  outside, so a continuous control gets a clear centre without fighting the
+  hand elsewhere. Switching the capped drive on at the window edge would be a
+  relay again, so the drive also fades out over the window's outer 16 counts.
+  Both fades share one scaling step (`haptic_shape()`: the smaller of the two
+  wins where they overlap), which saved the flash a second multiply would
+  cost. At half-width 6 (48 counts, the recommended value) the pull is full
+  from about 25 to 32 counts off centre and fades on both sides; at 5 or less
+  it never reaches full strength. A fader released near the window's outer
+  edge may stay there, its faded drive below breakaway, by design.
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed
