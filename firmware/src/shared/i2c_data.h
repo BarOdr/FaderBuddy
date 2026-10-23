@@ -393,6 +393,7 @@ enum HapticMode : uint8_t {
   HAPTIC_NO_HAPTICS              = 0,
   HAPTIC_SMOOTH_WITH_MAGNET_ENDS = 1,
   HAPTIC_DETENTS                 = 2,
+  HAPTIC_CENTRE_NOTCH            = 3,  // FW 1.6+; older firmware coasts (see below)
 };
 
 
