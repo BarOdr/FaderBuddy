@@ -26,6 +26,7 @@
 #include "motor_control.h"
 #include "touch_inject.h"
 #include "haptic_engage.h"
+#include "haptic_notch.h"
 
 // App metadata footer for the I2C bootloader host (see BL_APP_META_ADDR):
 // the two bytes at the fixed end-of-flash address, always equal to the same
@@ -829,14 +830,9 @@ void write_layer_target(uint8_t layer, uint8_t target) {
 void write_layer_haptic_config(uint8_t layer, uint16_t config) {
   if (layer > 7) return;
 
-  // Validate haptic configuration
-  HapticMode haptic_mode = static_cast<HapticMode>((config & HAPTIC_MODE_bm) >> HAPTIC_MODE_bp);
-  if (haptic_mode == HAPTIC_DETENTS) {
-    uint8_t detent_count = (config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
-    if (detent_count < 1 || detent_count > 10) {
-      return;  // Invalid config - reject
-    }
-  }
+  // Validate haptic configuration (haptic_notch.h): reject a bad detent
+  // count or notch width
+  if (!haptic_config_valid(config)) return;
 
   // Store config for layer
   layer_haptic_configs[layer] = config;
@@ -917,12 +913,16 @@ static float control_law(float error, float max_velocity) {
 // holding it just feels the pull saturate at the cap. Coasts in the deadband so
 // the fader is free at rest, and fades in past it (haptic_engage.h) so a finger
 // resting near the detent is not kicked back and forth across the edge.
-static void haptic_pull(float target, int16_t limit) {
+// Within `half_width` counts of the target only, fading out toward that edge
+// (haptic_notch.h); the centre notch sets it, the other haptics pull from
+// anywhere and leave it at its default.
+static void haptic_pull(float target, int16_t limit, int16_t half_width) {
   float error = target - input_ewma;
   int16_t drive = (int16_t)control_law(error, MOVE_VEL_UNLIMITED);
   if (drive > limit) drive = limit;
   if (drive < -limit) drive = -limit;
-  motor_set(haptic_engage((int16_t)error, (int16_t)move_deadband, drive), true, MOTOR_IDLE_COAST);
+  int16_t e = (int16_t)error;
+  motor_set(haptic_window(e, half_width, haptic_engage(e, (int16_t)move_deadband, drive)), true, MOTOR_IDLE_COAST);
 }
 
 void motor_update() {
@@ -1113,25 +1113,40 @@ void motor_update() {
 
         int16_t limit = get_strength_max_pwm((haptic_config & HAPTIC_DETENT_STRENGTH_bm) >> HAPTIC_DETENT_STRENGTH_bp);
 
-        if (!touch_haptics_allowed(touch_sources)) {
-          // An injection touched the fader with no hand (REG_DEBUG_TOUCH),
-          // now or earlier in this active period: no hand to feel the
-          // haptics, and an injection must never start the motor.
-          motor_coast();
-        } else if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
+        // One haptic_pull() call site for every mode (flash: it is then
+        // inlined once). `pull` false coasts, as each mode did on its own.
+        bool pull = touch_haptics_allowed(touch_sources);
+        uint16_t target = 0;
+        int16_t half_width = INT16_MAX;  // pull from anywhere
+        uint8_t detent_count = (haptic_config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
+        if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
           // Magnetic endpoints - pull toward calibration limits when near
           if (input_ewma < input_calib_min + HAPTIC_MAGNET_RANGE) {
-            haptic_pull(input_calib_min, limit);
+            target = input_calib_min;
           } else if (input_ewma > input_calib_max - HAPTIC_MAGNET_RANGE) {
-            haptic_pull(input_calib_max, limit);
+            target = input_calib_max;
           } else {
-            motor_coast();
+            pull = false;
           }
-        } else if (haptic_mode == HAPTIC_DETENTS) {
-          uint8_t detent_count = (haptic_config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
-          haptic_pull(get_nearest_detent_position(detent_count, input_ewma), limit);
+        } else if (haptic_mode == HAPTIC_DETENTS || haptic_mode == HAPTIC_CENTRE_NOTCH) {
+          if (haptic_mode == HAPTIC_CENTRE_NOTCH) {
+            // The centre notch: the single detent's target, but only within
+            // its window (the count field is the width), free outside it
+            half_width = haptic_notch_half_width(haptic_config);
+            detent_count = 1;
+          }
+          target = get_nearest_detent_position(detent_count, input_ewma);
         } else {
-          // No haptics for NO_HAPTICS mode
+          // No haptics for NO_HAPTICS mode (and an unknown mode)
+          pull = false;
+        }
+
+        if (pull) {
+          haptic_pull(target, limit, half_width);
+        } else {
+          // Also when an injection touched the fader with no hand
+          // (REG_DEBUG_TOUCH), now or earlier in this active period: no hand
+          // to feel the haptics, and an injection must never start the motor.
           motor_coast();
         }
       }
