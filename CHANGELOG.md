@@ -74,7 +74,10 @@ for production purposes.
   count field is the window's half-width in units of 8 ADC counts (1-15; 0 is
   rejected), 6 recommended. The drive fades in past the deadband and out over
   the window's outer 16 counts, so the edge does not kick. Firmware version
-  1.6 (`FW_VERSION_CENTRE_NOTCH`); older firmware coasts on mode 3, so the
+  1.6 (`FW_VERSION_CENTRE_NOTCH`). With the default deadband a width of 4 or
+  less never reaches full strength, 5 reaches it at a single count and 1 never
+  pulls. The window starts after each fader's calibrated deadband (8-20
+  counts), so faders can feel slightly different. Older firmware coasts on mode 3, so the
   protocol version is unchanged.
 
 ### 1.5

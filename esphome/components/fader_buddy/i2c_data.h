@@ -467,9 +467,9 @@ enum HapticMode : uint8_t {
 // midpoint); 0 is rejected like a bad detent count. The notch pulls toward
 // the midpoint only inside that window, fading in past the deadband and out
 // over the window's outer 16 counts, and coasts outside it. With the default
-// deadband (8 counts) a width of 5 or less never reaches full strength and 1
-// never pulls; 6 (48 counts) is the recommended value. Other modes ignore the
-// field.
+// deadband (8 counts) a width of 4 or less never reaches full strength, 5
+// reaches it at a single count (24 off centre) and 1 never pulls; 6 (48
+// counts) is the recommended value. Other modes ignore the field.
 #define HAPTIC_DETENT_COUNT_bp      (3)
 #define HAPTIC_DETENT_COUNT_bs      (4)
 #define HAPTIC_DETENT_COUNT_bm      (((1U << HAPTIC_DETENT_COUNT_bs) - 1) << HAPTIC_DETENT_COUNT_bp)
