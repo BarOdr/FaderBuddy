@@ -49,6 +49,17 @@ static inline int16_t haptic_window(int16_t error, int16_t half_width, int16_t d
   return haptic_shape(error, -HAPTIC_SOFT_BAND, half_width, drive);
 }
 
+// The window HAPTIC_STEP_NOTCHES pulls within, around the nearest step: the
+// config's HAPTIC_NOTCH_WIDTH field (units of 8 counts) while the fader is
+// touched, so the hand feels a notch at each step and nothing between; the
+// whole travel (INT16_MAX, as HAPTIC_DETENTS) when it is not, so a released
+// fader settles on the nearest step.
+static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched) {
+  (void)config;
+  (void)touched;
+  return INT16_MAX;  // contract stub
+}
+
 // Whether a layer haptic config word may be stored: detents need a count of
 // 1-10 and the centre notch a width of 1-15; other modes are not checked (an
 // unknown mode coasts).

@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (6)
+#define FW_VERSION_MINOR (7)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -78,6 +78,11 @@
 // that needs the notch checks this; no protocol-version bump, as the mode is
 // additive.
 #define FW_VERSION_CENTRE_NOTCH (0x0106)  // 1.6
+
+// Minimum firmware version that implements HAPTIC_STEP_NOTCHES. Older
+// firmware stores the config but coasts on the unknown mode, as for the
+// centre notch; no protocol-version bump.
+#define FW_VERSION_STEP_NOTCHES (0x0107)  // 1.7
 
 
 /*
@@ -400,6 +405,7 @@ enum HapticMode : uint8_t {
   HAPTIC_SMOOTH_WITH_MAGNET_ENDS = 1,
   HAPTIC_DETENTS                 = 2,
   HAPTIC_CENTRE_NOTCH            = 3,  // FW 1.6+; older firmware coasts (see below)
+  HAPTIC_STEP_NOTCHES            = 4,  // FW 1.7+; older firmware coasts (see below)
 };
 
 
@@ -479,4 +485,16 @@ enum HapticMode : uint8_t {
 #define HAPTIC_DETENT_STRENGTH_bs   (3)
 #define HAPTIC_DETENT_STRENGTH_bm   (((1U << HAPTIC_DETENT_STRENGTH_bs) - 1) << HAPTIC_DETENT_STRENGTH_bp)
 
-// Reserved: 6 bits at position 10-15 (must be 0)
+// Step notch half-width: 4 bits at position 10, HAPTIC_STEP_NOTCHES only, in
+// units of 8 ADC counts (1-15; 0 is rejected). HAPTIC_STEP_NOTCHES puts a
+// detent at each of `count` (2-10) steps, as HAPTIC_DETENTS does, but while
+// the fader is touched it pulls only within this half-width of the nearest
+// step and is free between the steps; untouched (a release, until the idle
+// timeout) it pulls to the nearest step from anywhere, as HAPTIC_DETENTS
+// does, so a fader let go between two steps settles on the nearer one.
+// Other modes require the field to be 0.
+#define HAPTIC_NOTCH_WIDTH_bp       (10)
+#define HAPTIC_NOTCH_WIDTH_bs       (4)
+#define HAPTIC_NOTCH_WIDTH_bm       (((1U << HAPTIC_NOTCH_WIDTH_bs) - 1) << HAPTIC_NOTCH_WIDTH_bp)
+
+// Reserved: 2 bits at position 14-15 (must be 0)
