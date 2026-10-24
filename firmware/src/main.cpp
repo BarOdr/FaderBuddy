@@ -1127,12 +1127,16 @@ void motor_update() {
           } else {
             pull = false;
           }
-        } else if (haptic_mode == HAPTIC_DETENTS || haptic_mode == HAPTIC_CENTRE_NOTCH) {
+        } else if (haptic_mode == HAPTIC_DETENTS || haptic_mode == HAPTIC_CENTRE_NOTCH || haptic_mode == HAPTIC_STEP_NOTCHES) {
           if (haptic_mode == HAPTIC_CENTRE_NOTCH) {
             // The centre notch: the single detent's target, but only within
             // its window (the count field is the width), free outside it
             half_width = haptic_notch_half_width(haptic_config);
             detent_count = 1;
+          } else if (haptic_mode == HAPTIC_STEP_NOTCHES) {
+            // Step notches: the detents' targets, pulled only within the
+            // notch width under the hand; released, from anywhere (the snap)
+            half_width = haptic_step_notch_half_width(haptic_config, (state & STATE_TOUCH_bm) != 0);
           }
           target = get_nearest_detent_position(detent_count, input_ewma);
         } else {

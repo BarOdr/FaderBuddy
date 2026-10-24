@@ -55,18 +55,19 @@ static inline int16_t haptic_window(int16_t error, int16_t half_width, int16_t d
 // whole travel (INT16_MAX, as HAPTIC_DETENTS) when it is not, so a released
 // fader settles on the nearest step.
 static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched) {
-  (void)config;
-  (void)touched;
-  return INT16_MAX;  // contract stub
+  if (!touched) return INT16_MAX;
+  return (int16_t)((config & HAPTIC_NOTCH_WIDTH_bm) >> (HAPTIC_NOTCH_WIDTH_bp - HAPTIC_NOTCH_UNIT_SHIFT));
 }
 
 // Whether a layer haptic config word may be stored: detents need a count of
-// 1-10 and the centre notch a width of 1-15; other modes are not checked (an
+// 1-10, the centre notch a width of 1-15 and the step notches 2-10 steps and
+// a width of 1-15; other modes are not checked (an
 // unknown mode coasts).
 static inline bool haptic_config_valid(uint16_t config) {
   uint8_t mode = (config & HAPTIC_MODE_bm) >> HAPTIC_MODE_bp;
   uint8_t count = (config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
   if (mode == HAPTIC_DETENTS) return count >= 1 && count <= 10;
   if (mode == HAPTIC_CENTRE_NOTCH) return count != 0;
+  if (mode == HAPTIC_STEP_NOTCHES) return count >= 2 && count <= 10 && (config & HAPTIC_NOTCH_WIDTH_bm) != 0;
   return true;
 }
