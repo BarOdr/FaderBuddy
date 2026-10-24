@@ -230,6 +230,24 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   - Stall exposure is the same as for detents: a fader held off centre at
     strength 7 stalls the motor until it is released, and the drive in the
     outer fade stays below breakaway until idle (1 s).
+- **Step notches change the window with the touch** (`HAPTIC_STEP_NOTCHES`,
+  `haptic_step_notch_half_width()`). The steps are the detents' targets
+  (`get_nearest_detent_position()`, 2-10 evenly spaced including the ends).
+  While the fader is touched (`STATE_TOUCH`) each step is a notch: the pull
+  acts only within the `HAPTIC_NOTCH_WIDTH` half-width of the nearest step,
+  shaped as the centre notch (soft engage past the deadband, fade-out over
+  the outer 16 counts), and the hand moves freely between steps. Untouched,
+  the window is the whole travel, as for detents, so a fader released between
+  two steps is pulled to the nearer one: the release snap needs no host
+  traffic. The window changes in one tick when the touch bit drops; the drive
+  then grows from wherever the fader is through the same soft engage, so the
+  snap is no harsher than a detent's pull. A host moving the fader (remote
+  move) is unaffected: haptics run only in INPUT_ACTIVE.
+  - Width: neighbouring notches overlap when the half-width is more than half
+    the step spacing (about 1000/(count-1) counts of calibrated travel); the
+    nearest step then wins everywhere and the mode feels like detents under
+    the hand. Hosts should keep the width well below that.
+  - Stall exposure is as for detents, but only within a notch while held.
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed
