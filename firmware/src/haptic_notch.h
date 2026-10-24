@@ -59,6 +59,22 @@ static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched
   return (int16_t)((config & HAPTIC_NOTCH_WIDTH_bm) >> (HAPTIC_NOTCH_WIDTH_bp - HAPTIC_NOTCH_UNIT_SHIFT));
 }
 
+// How long the touch bit must stay clear before HAPTIC_STEP_NOTCHES treats the
+// fader as released and widens its window to the whole travel. A PTC release
+// glitch with the hand resting between two steps would otherwise switch the
+// drive from 0 to the cap toward the nearest step for that tick and back: a
+// kick under the hand. The same 50 ms as the gate on entering INPUT_ACTIVE
+// (TOUCH_OVERRIDE_DURATION_THRESHOLD in main.cpp).
+#define HAPTIC_STEP_RELEASE_SETTLE_MS (50)
+
+// Whether HAPTIC_STEP_NOTCHES keeps the touched (notch) window: while the
+// touch bit is set, and for HAPTIC_STEP_RELEASE_SETTLE_MS after it drops.
+// `ms_since_touch_change` is now - the time of the last touch bit edge
+// (unsigned, so it survives the millis() wrap).
+static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_change) {
+  return touched;
+}
+
 // Whether a layer haptic config word may be stored: detents need a count of
 // 1-10, the centre notch a width of 1-15 and the step notches 2-10 steps and
 // a width of 1-15; other modes are not checked (an

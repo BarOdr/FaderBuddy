@@ -83,6 +83,29 @@ void test_touched_window_has_no_step_anywhere() {
   }
 }
 
+void test_a_touch_glitch_shorter_than_the_settle_time_keeps_the_notch_window() {
+  // The hand rests between two steps and the PTC drops the touch bit for a
+  // few ticks: the window stays the notch, so the hand feels no kick.
+  TEST_ASSERT_TRUE(haptic_step_notch_held(false, 0));
+  TEST_ASSERT_TRUE(haptic_step_notch_held(false, 10));
+  TEST_ASSERT_TRUE(haptic_step_notch_held(false, HAPTIC_STEP_RELEASE_SETTLE_MS));
+  const uint16_t cfg = step_notches(3, 3, 4);
+  TEST_ASSERT_EQUAL_INT16(0, pull(cfg, haptic_step_notch_held(false, 20), 200, KICK));
+}
+
+void test_a_release_held_past_the_settle_time_pulls_to_the_step() {
+  TEST_ASSERT_EQUAL_UINT32(50, HAPTIC_STEP_RELEASE_SETTLE_MS);
+  TEST_ASSERT_FALSE(haptic_step_notch_held(false, HAPTIC_STEP_RELEASE_SETTLE_MS + 1));
+  TEST_ASSERT_FALSE(haptic_step_notch_held(false, 1000));
+  const uint16_t cfg = step_notches(3, 3, 4);
+  TEST_ASSERT_EQUAL_INT16(KICK, pull(cfg, haptic_step_notch_held(false, 51), 200, KICK));
+}
+
+void test_a_held_touch_keeps_the_notch_window_however_long() {
+  TEST_ASSERT_TRUE(haptic_step_notch_held(true, 0));
+  TEST_ASSERT_TRUE(haptic_step_notch_held(true, 100000));
+}
+
 void test_step_notches_config_needs_two_to_ten_steps_and_a_width() {
   TEST_ASSERT_TRUE(haptic_config_valid(step_notches(2, 3, 6)));
   TEST_ASSERT_TRUE(haptic_config_valid(step_notches(10, 7, 15)));
@@ -109,6 +132,9 @@ int main() {
   RUN_TEST(test_touched_fader_feels_a_pull_inside_the_notch);
   RUN_TEST(test_released_fader_between_steps_is_pulled_to_the_step);
   RUN_TEST(test_touched_window_has_no_step_anywhere);
+  RUN_TEST(test_a_touch_glitch_shorter_than_the_settle_time_keeps_the_notch_window);
+  RUN_TEST(test_a_release_held_past_the_settle_time_pulls_to_the_step);
+  RUN_TEST(test_a_held_touch_keeps_the_notch_window_however_long);
   RUN_TEST(test_step_notches_config_needs_two_to_ten_steps_and_a_width);
   RUN_TEST(test_other_modes_still_validate_as_before);
   return UNITY_END();
