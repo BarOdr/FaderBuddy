@@ -91,7 +91,8 @@ for production purposes.
   protocol version is unchanged.
 - The application links with relaxation (`-Wl,--relax`, as megaTinyCore's
   own build does) to make room: relaxation saves about 290 bytes, so with
-  mode 4 the app is 228 bytes smaller than in 1.6; the vector table layout is
+  mode 4 and its release guard the app is about 188 bytes smaller than in
+  1.6 (14844 -> 14656 B); the vector table layout is
   unchanged.
 
 ### 1.5
