@@ -49,13 +49,41 @@ static inline int16_t haptic_window(int16_t error, int16_t half_width, int16_t d
   return haptic_shape(error, -HAPTIC_SOFT_BAND, half_width, drive);
 }
 
+// The window HAPTIC_STEP_NOTCHES pulls within, around the nearest step: the
+// config's HAPTIC_NOTCH_WIDTH field (units of 8 counts) while the fader is
+// touched, so the hand feels a notch at each step and nothing between; the
+// whole travel (INT16_MAX, as HAPTIC_DETENTS) when it is not, so a released
+// fader settles on the nearest step.
+static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched) {
+  if (!touched) return INT16_MAX;
+  return (int16_t)((config & HAPTIC_NOTCH_WIDTH_bm) >> (HAPTIC_NOTCH_WIDTH_bp - HAPTIC_NOTCH_UNIT_SHIFT));
+}
+
+// How long the touch bit must stay clear before HAPTIC_STEP_NOTCHES treats the
+// fader as released and widens its window to the whole travel. A PTC release
+// glitch with the hand resting between two steps would otherwise switch the
+// drive from 0 to the cap toward the nearest step for that tick and back: a
+// kick under the hand. The same 50 ms as the gate on entering INPUT_ACTIVE
+// (TOUCH_OVERRIDE_DURATION_THRESHOLD in main.cpp).
+#define HAPTIC_STEP_RELEASE_SETTLE_MS (50)
+
+// Whether HAPTIC_STEP_NOTCHES keeps the touched (notch) window: while the
+// touch bit is set, and for HAPTIC_STEP_RELEASE_SETTLE_MS after it drops.
+// `ms_since_touch_change` is now - the time of the last touch bit edge
+// (unsigned, so it survives the millis() wrap).
+static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_change) {
+  return touched || ms_since_touch_change <= HAPTIC_STEP_RELEASE_SETTLE_MS;
+}
+
 // Whether a layer haptic config word may be stored: detents need a count of
-// 1-10 and the centre notch a width of 1-15; other modes are not checked (an
+// 1-10, the centre notch a width of 1-15 and the step notches 2-10 steps and
+// a width of 1-15; other modes are not checked (an
 // unknown mode coasts).
 static inline bool haptic_config_valid(uint16_t config) {
   uint8_t mode = (config & HAPTIC_MODE_bm) >> HAPTIC_MODE_bp;
   uint8_t count = (config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
   if (mode == HAPTIC_DETENTS) return count >= 1 && count <= 10;
   if (mode == HAPTIC_CENTRE_NOTCH) return count != 0;
+  if (mode == HAPTIC_STEP_NOTCHES) return count >= 2 && count <= 10 && (config & HAPTIC_NOTCH_WIDTH_bm) != 0;
   return true;
 }

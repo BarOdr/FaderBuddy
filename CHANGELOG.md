@@ -79,6 +79,21 @@ for production purposes.
   pulls. The window starts after each fader's calibrated deadband (8-20
   counts), so faders can feel slightly different. Older firmware coasts on mode 3, so the
   protocol version is unchanged.
+- New haptic mode `HAPTIC_STEP_NOTCHES` (4), for stepped controls (an enum,
+  a switch): `count` (2-10) steps placed as `HAPTIC_DETENTS` places them,
+  but while the fader is touched it pulls only within a notch around the
+  nearest step and is free between steps; untouched (50 ms after a release,
+  so a touch glitch does not kick, until the idle timeout) it pulls to the nearest step from anywhere, so a fader let
+  go between two steps settles on the nearer one. The notch half-width is the
+  new `HAPTIC_NOTCH_WIDTH` field (bits 10-13, units of 8 ADC counts, 1-15; 0
+  is rejected, as are fewer than 2 or more than 10 steps). Firmware version
+  1.7 (`FW_VERSION_STEP_NOTCHES`); older firmware coasts on mode 4, so the
+  protocol version is unchanged.
+- The application links with relaxation (`-Wl,--relax`, as megaTinyCore's
+  own build does) to make room: relaxation saves about 290 bytes, so with
+  mode 4 and its release guard the app is about 188 bytes smaller than in
+  1.6 (14844 -> 14656 B); the vector table layout is
+  unchanged.
 
 ### 1.5
 
