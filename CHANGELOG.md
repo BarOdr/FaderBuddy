@@ -62,6 +62,12 @@ for production purposes.
   STATE bit 30 is set while a hold is active. It can stop a motor but never
   start one: once an injection touched the fader with no hand, haptics stay off
   until the fader goes idle or a real hand touches it. In every build. Firmware without the register reads back 0xFFFF.
+- A haptic pull fades in over 16 ADC counts past the deadband instead of
+  stepping from nothing to breakaway drive at its edge. A finger resting on a
+  detent kept nudging the fader across that edge and the motor kicked back each
+  time, so the fader trembled under the hand. The detent's held force further
+  out is unchanged; a released fader may settle up to about 20 counts off the
+  detent's centre.
 
 ### 1.5
 

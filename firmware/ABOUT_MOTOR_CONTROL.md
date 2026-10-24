@@ -195,6 +195,16 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   *is* the felt force. Strength 0 is kept well above breakaway so even the
   weakest setting returns the carriage to the detent.
 - **The deadband coasts rather than brakes**, so the fader is free at rest.
+- **The drive fades in past the deadband** (`haptic_engage()`,
+  `HAPTIC_SOFT_BAND`): the law's feedforward floor is breakaway, about half
+  duty, so switching it on at the deadband edge is a relay. A finger resting
+  on the fader nudges it across that edge again and again and the motor kicks
+  each time, which the hand feels as trembling. Scaling the drive from 0 at the
+  edge to full over 16 counts turns the edge into a spring. The price is that a
+  released fader can stop short of the detent's centre once the scaled drive
+  falls below breakaway: up to about 20 counts at strength 3, with that weak
+  drive left on until the idle timeout. (The error is truncated to whole
+  counts, so the deadband is effectively 9.)
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed
