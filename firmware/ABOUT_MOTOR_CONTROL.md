@@ -185,7 +185,8 @@ unset.
 ## Haptics
 
 Haptics are not a second controller. `haptic_pull()` picks a target - the
-nearest detent, or the calibrated end within `HAPTIC_MAGNET_RANGE` of it -
+nearest detent, the calibrated end within `HAPTIC_MAGNET_RANGE` of it, or the
+calibrated midpoint for the centre notch -
 and hands the error to the same `control_law()` a remote move uses, with no
 speed limit, no stall ramp and no take-up ceiling. Only two things differ:
 
@@ -205,6 +206,30 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   falls below breakaway: up to about 20 counts at strength 3, with that weak
   drive left on until the idle timeout. (The error is truncated to whole
   counts, so the deadband is effectively 9.)
+- **The centre notch acts only within a window** (`HAPTIC_CENTRE_NOTCH`,
+  `haptic_notch.h`). A single detent pulls to the centre from anywhere on the
+  travel, a spring; the notch pulls only within its half-width of the
+  midpoint (the config's count field, in units of 8 counts) and coasts
+  outside, so a continuous control gets a clear centre without fighting the
+  hand elsewhere. Switching the capped drive on at the window edge would be a
+  relay again, so the drive also fades out over the window's outer 16 counts.
+  Both fades share one scaling step (`haptic_shape()`: the smaller of the two
+  wins where they overlap), which saved the flash a second multiply would
+  cost. At half-width 6 (48 counts, the recommended value) the pull is full
+  from about 25 to 32 counts off centre and fades on both sides; at 4 or less
+  it never reaches full strength, and 5 reaches it at exactly one count (24).
+  A fader released near the window's outer edge may stay there, its faded
+  drive below breakaway, by design.
+  - The window starts after each fader's calibrated deadband (8-20 counts),
+    not at the default 8. At deadband 20, width 6 peaks at about 14/16 of
+    full strength, so faders can feel slightly different.
+  - A fader released inside the window is pulled to the centre, so a resting
+    position within about the deadband to 32 counts of centre is not kept
+    once the hand lifts (a UX choice for Bartek: "clear but not sticky" vs
+    "snaps to centre").
+  - Stall exposure is the same as for detents: a fader held off centre at
+    strength 7 stalls the motor until it is released, and the drive in the
+    outer fade stays below breakaway until idle (1 s).
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed

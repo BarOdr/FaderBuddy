@@ -27,13 +27,29 @@
 
 // The drive a haptic pull applies for `error` (target - position, whole ADC
 // counts), given `drive`, the control law's output already capped at the
-// haptic strength (at most 254 either way): 0 within `deadband`, the full
-// `drive` from `deadband + HAPTIC_SOFT_BAND` on, and in between `drive` scaled
-// by the counts past the deadband. The sign of `drive` is kept, so the law's
-// damping still acts.
+// haptic strength (at most 254 either way), in one scaling step for both
+// fades (flash: one multiply and shift, not one per fade):
+//   - 0 within `deadband`, fading in over HAPTIC_SOFT_BAND counts past it;
+//   - 0 at and beyond `half_width` counts from the target, fading out over the
+//     HAPTIC_SOFT_BAND counts inside that edge (the centre notch's window,
+//     haptic_notch.h; INT16_MAX for a pull from anywhere).
+// Where only one fade acts the result is exactly that fade; where both
+// overlap (a window narrower than deadband + 2 bands) the smaller one wins,
+// still zero at both ends with no step. The sign of `drive` is kept, so
+// the law's damping still acts.
+static inline int16_t haptic_shape(int16_t error, int16_t deadband, int16_t half_width, int16_t drive) {
+  int16_t distance = error < 0 ? -error : error;
+  int16_t past = distance - deadband;
+  int16_t inside = half_width - distance;
+  if (past <= 0 || inside <= 0) return 0;
+  int16_t scale = past < inside ? past : inside;
+  if (scale >= HAPTIC_SOFT_BAND) return drive;
+  return (int16_t)((drive * scale) >> HAPTIC_SOFT_BAND_SHIFT);
+}
+
+// The soft engage alone: 0 within `deadband`, the full `drive` from
+// `deadband + HAPTIC_SOFT_BAND` on, and in between `drive` scaled by the
+// counts past the deadband.
 static inline int16_t haptic_engage(int16_t error, int16_t deadband, int16_t drive) {
-  int16_t past = (error < 0 ? -error : error) - deadband;
-  if (past <= 0) return 0;
-  if (past >= HAPTIC_SOFT_BAND) return drive;
-  return (int16_t)((drive * past) >> HAPTIC_SOFT_BAND_SHIFT);
+  return haptic_shape(error, deadband, INT16_MAX, drive);
 }

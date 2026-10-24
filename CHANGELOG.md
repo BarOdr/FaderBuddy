@@ -68,6 +68,17 @@ for production purposes.
   time, so the fader trembled under the hand. The detent's held force further
   out is unchanged; a released fader may settle up to about 20 counts off the
   detent's centre.
+- New haptic mode `HAPTIC_CENTRE_NOTCH` (3): a light pull toward the
+  calibrated midpoint only within a window around it, free outside, for a
+  continuous control that needs a clear but not sticky centre. The detent
+  count field is the window's half-width in units of 8 ADC counts (1-15; 0 is
+  rejected), 6 recommended. The drive fades in past the deadband and out over
+  the window's outer 16 counts, so the edge does not kick. Firmware version
+  1.6 (`FW_VERSION_CENTRE_NOTCH`). With the default deadband a width of 4 or
+  less never reaches full strength, 5 reaches it at a single count and 1 never
+  pulls. The window starts after each fader's calibrated deadband (8-20
+  counts), so faders can feel slightly different. Older firmware coasts on mode 3, so the
+  protocol version is unchanged.
 
 ### 1.5
 
