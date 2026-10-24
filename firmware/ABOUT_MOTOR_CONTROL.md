@@ -239,14 +239,26 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   the outer 16 counts), and the hand moves freely between steps. Untouched,
   the window is the whole travel, as for detents, so a fader released between
   two steps is pulled to the nearer one: the release snap needs no host
-  traffic. The window changes in one tick when the touch bit drops; the drive
-  then grows from wherever the fader is through the same soft engage, so the
-  snap is no harsher than a detent's pull. A host moving the fader (remote
-  move) is unaffected: haptics run only in INPUT_ACTIVE.
+  traffic. The window widens once the touch bit has stayed clear for 50 ms
+  (`HAPTIC_STEP_RELEASE_SETTLE_MS`, `haptic_step_notch_held()`, the same gate
+  as entering INPUT_ACTIVE), so a PTC release glitch with the hand resting
+  between steps does not kick toward the nearest step. The soft engage fades
+  the drive in only over the 16 counts past the deadband: a fader released
+  within that band of a step starts gently, but one released further away
+  (40 counts or more) gets the full strength cap in one tick and the control
+  law decelerates it onto the step. That is the same as a detent's pull on a
+  fader a remote move left off a detent, so not a new risk, but the snap is
+  firmer than the notch under the hand. A host moving the fader (remote move)
+  is unaffected: haptics run only in INPUT_ACTIVE.
   - Width: neighbouring notches overlap when the half-width is more than half
     the step spacing (about 1000/(count-1) counts of calibrated travel); the
     nearest step then wins everywhere and the mode feels like detents under
     the hand. Hosts should keep the width well below that.
+  - Narrow widths: the notch acts only beyond the move deadband, so a width
+    of 1-2 units (8-16 counts) is at or under the deadband of faders
+    calibrated to 16-20 counts and never pulls under the hand; only the
+    release snap remains, as for the centre notch. Keep the width at least
+    deadband/8 + 2 units (4-6 is the planned range).
   - Stall exposure is as for detents, but only within a notch while held.
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above

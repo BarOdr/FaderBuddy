@@ -1135,8 +1135,10 @@ void motor_update() {
             detent_count = 1;
           } else if (haptic_mode == HAPTIC_STEP_NOTCHES) {
             // Step notches: the detents' targets, pulled only within the
-            // notch width under the hand; released, from anywhere (the snap)
-            half_width = haptic_step_notch_half_width(haptic_config, (state & STATE_TOUCH_bm) != 0);
+            // notch width under the hand; released for 50 ms, from anywhere
+            // (the snap), so a short touch glitch does not kick
+            half_width = haptic_step_notch_half_width(
+                haptic_config, haptic_step_notch_held((state & STATE_TOUCH_bm) != 0, now - touch_state_change_millis));
           }
           target = get_nearest_detent_position(detent_count, input_ewma);
         } else {

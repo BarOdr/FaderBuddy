@@ -72,7 +72,7 @@ static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched
 // `ms_since_touch_change` is now - the time of the last touch bit edge
 // (unsigned, so it survives the millis() wrap).
 static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_change) {
-  return touched;
+  return touched || ms_since_touch_change <= HAPTIC_STEP_RELEASE_SETTLE_MS;
 }
 
 // Whether a layer haptic config word may be stored: detents need a count of

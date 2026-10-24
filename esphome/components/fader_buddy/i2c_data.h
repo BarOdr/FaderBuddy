@@ -491,8 +491,12 @@ enum HapticMode : uint8_t {
 // the fader is touched it pulls only within this half-width of the nearest
 // step and is free between the steps; untouched (a release, until the idle
 // timeout) it pulls to the nearest step from anywhere, as HAPTIC_DETENTS
-// does, so a fader let go between two steps settles on the nearer one.
-// Other modes require the field to be 0.
+// does, so a fader let go between two steps settles on the nearer one; it
+// widens to the whole travel only once the touch has been released for 50 ms,
+// so a touch glitch does not kick. The notch acts beyond the move deadband,
+// so a width of 1-2 (8-16 counts) never pulls under the hand on a fader whose
+// deadband is 16-20 counts; keep it at least deadband/8 + 2. Other modes
+// ignore the field (it is not checked); hosts should send 0.
 #define HAPTIC_NOTCH_WIDTH_bp       (10)
 #define HAPTIC_NOTCH_WIDTH_bs       (4)
 #define HAPTIC_NOTCH_WIDTH_bm       (((1U << HAPTIC_NOTCH_WIDTH_bs) - 1) << HAPTIC_NOTCH_WIDTH_bp)
