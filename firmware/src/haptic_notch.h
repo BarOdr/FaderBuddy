@@ -22,6 +22,7 @@
 
 #include "shared/i2c_data.h"
 #include "haptic_engage.h"
+#include "util.h"
 
 // The notch half-width is the config's HAPTIC_DETENT_COUNT field in units of
 // 8 ADC counts (1-15: 8-120 counts, about 0.5-7 mm on a 60 mm fader).
@@ -73,6 +74,16 @@ static inline int16_t haptic_step_notch_half_width(uint16_t config, bool touched
 // (unsigned, so it survives the millis() wrap).
 static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_change) {
   return touched || ms_since_touch_change <= HAPTIC_STEP_RELEASE_SETTLE_MS;
+}
+
+// Contract stubs, implemented in the next commit.
+static inline int16_t haptic_placed_notch_half_width(uint16_t config, bool touched) {
+  return haptic_step_notch_half_width(config, touched);
+}
+static inline uint16_t haptic_placed_notch_target(const volatile uint8_t *positions, uint8_t count, int16_t position,
+                                                  uint16_t calib_min, uint16_t calib_max) {
+  (void)positions; (void)count; (void)position; (void)calib_max;
+  return calib_min;
 }
 
 // Whether a layer haptic config word may be stored: detents need a count of
