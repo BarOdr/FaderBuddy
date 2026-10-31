@@ -80,6 +80,9 @@ static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_
   return touched || ms_since_touch_change <= HAPTIC_STEP_RELEASE_SETTLE_MS;
 }
 
+// Stub until the test has run RED.
+static inline bool haptic_placed_notch_under_hand(bool touched, int16_t, int16_t) { return touched; }
+
 // The window HAPTIC_PLACED_NOTCHES pulls within: the config's
 // HAPTIC_NOTCH_WIDTH field while the fader is touched, and no window at all
 // (0, motor_update() coasts) when it is not. Unlike the step notches there is

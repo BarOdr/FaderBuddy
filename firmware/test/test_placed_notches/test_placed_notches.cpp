@@ -66,6 +66,23 @@ void test_released_fader_has_no_window_at_all() {
   TEST_ASSERT_EQUAL_INT16(0, haptic_placed_notch_half_width(placed(4, 1, 1), false));
 }
 
+void test_the_pull_ends_at_the_first_low_reading_not_at_the_filtered_release() {
+  // STATE_TOUCH stays set for two more acquisitions (40 ms and more) after the
+  // reading falls below the release threshold: a fader held on a notch's slope
+  // would slide under the motor with no hand on it.
+  TEST_ASSERT_FALSE(haptic_placed_notch_under_hand(true, 49, 50));
+  TEST_ASSERT_FALSE(haptic_placed_notch_under_hand(true, -3, 50));
+}
+
+void test_a_reading_at_the_threshold_still_pulls_under_the_hand() {
+  TEST_ASSERT_TRUE(haptic_placed_notch_under_hand(true, 50, 50));
+  TEST_ASSERT_TRUE(haptic_placed_notch_under_hand(true, 400, 50));
+}
+
+void test_no_reading_pulls_without_the_touch_bit() {
+  TEST_ASSERT_FALSE(haptic_placed_notch_under_hand(false, 400, 50));
+}
+
 void test_released_fader_feels_nothing_at_any_distance() {
   const uint16_t cfg = placed(2, 7, 15);
   for (int16_t error = -1000; error <= 1000; error += 7) {
@@ -123,6 +140,9 @@ int main(int, char **) {
   RUN_TEST(test_rejects_no_notch_too_many_notches_and_no_width);
   RUN_TEST(test_touched_window_is_the_width_field_in_eight_count_units);
   RUN_TEST(test_released_fader_has_no_window_at_all);
+  RUN_TEST(test_the_pull_ends_at_the_first_low_reading_not_at_the_filtered_release);
+  RUN_TEST(test_a_reading_at_the_threshold_still_pulls_under_the_hand);
+  RUN_TEST(test_no_reading_pulls_without_the_touch_bit);
   RUN_TEST(test_released_fader_feels_nothing_at_any_distance);
   RUN_TEST(test_touched_fader_feels_a_pull_inside_the_notch);
   RUN_TEST(test_touched_fader_is_free_outside_the_notch);
