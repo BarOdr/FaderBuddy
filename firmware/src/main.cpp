@@ -171,6 +171,9 @@ uint32_t haptic_config = 0;  // Bit-packed haptic configuration register (curren
 uint16_t layer_haptic_configs[8];      // 16 bytes - 16-bit haptic config per layer
 uint8_t layer_restore_positions[8];    // 8 bytes - restore position per layer (0-255)
 uint8_t layer_speeds[8];               // 8 bytes - per-layer move speed (see LAYER_SPEED_*)
+// 32 bytes - placed notch positions per layer (REG_LAYER_NOTCHES). The ISR
+// writes them directly and the main loop reads them a byte at a time.
+volatile uint8_t layer_notches[8][HAPTIC_PLACED_NOTCHES_MAX];
 uint8_t active_layer = 0;              // 1 byte - currently active layer (0-7)
 uint8_t pending_layer_change = 0xFF;   // 1 byte - deferred layer change (0xFF = none, 0-7 = layer)
 uint8_t queried_layer = 0;             // 1 byte - for layer-addressed read protocol
@@ -469,10 +472,8 @@ void onI2cRequest() {
   } else if (r == REG_LAYER_HAPTIC_CONFIG) {
       // Return haptic config for the previously queried layer (16 bits, big-endian)
       i2c_write_u16(layer_haptic_configs[queried_layer]);
-  } else if (r == REG_FW_VERSION) {
-      // Application firmware version (16 bits, big-endian)
-      Wire.write((FW_VERSION >> 8) & 0xFF);  // High byte
-      Wire.write(FW_VERSION & 0xFF);         // Low byte
+  } else if (r == REG_LAYER_NOTCHES) {
+      for (uint8_t i = 0; i < HAPTIC_PLACED_NOTCHES_MAX; i++) Wire.write(layer_notches[queried_layer][i]);
   }
 }
 
@@ -503,30 +504,39 @@ void onI2cReceive(int howMany) {
       }
       break;
     case REG_LAYER_TARGET:
-      if (howMany == 2) {
-        // Read setup: register + layer index
-        queried_layer = Wire.read() & 0x07;
-      } else if (howMany == 3 || howMany == 4) {
-        // Write: register + layer + target position [+ optional speed].
-        // The 3-byte form is the original protocol and leaves the layer's
-        // existing speed alone, so old controllers are unaffected.
-        i2c_layer_target_write.layer = Wire.read() & 0x07;
-        i2c_layer_target_write.target = Wire.read();
-        i2c_layer_target_write.has_speed = (howMany == 4);
-        i2c_layer_target_write.speed = (howMany == 4) ? Wire.read() : LAYER_SPEED_FULL;
-        i2c_layer_target_write.valid = true;
-      }
-      break;
     case REG_LAYER_HAPTIC_CONFIG:
-      if (howMany == 2) {
-        // Read setup: register + layer index
-        queried_layer = Wire.read() & 0x07;
-      } else if (howMany == 4) {
-        // Write: register + layer + 2 bytes config (big-endian)
-        // Copy data to volatile struct for main loop to process
-        i2c_layer_haptic_write.layer = Wire.read() & 0x07;
-        i2c_layer_haptic_write.config = ((uint16_t)Wire.read() << 8) | Wire.read();
-        i2c_layer_haptic_write.valid = true;
+    case REG_LAYER_NOTCHES:
+      // All three: register + layer index selects the layer for a read, and a
+      // longer message writes that layer (one decoding saves flash).
+      if (howMany >= 2) {
+        uint8_t layer = Wire.read() & 0x07;
+        if (howMany == 2) {
+          queried_layer = layer;
+        } else if (current_register == REG_LAYER_TARGET) {
+          if (howMany <= 4) {
+            // Write: target position [+ optional speed]. The 3-byte form is
+            // the original protocol and leaves the layer's existing speed
+            // alone, so old controllers are unaffected.
+            i2c_layer_target_write.layer = layer;
+            i2c_layer_target_write.target = Wire.read();
+            i2c_layer_target_write.has_speed = (howMany == 4);
+            i2c_layer_target_write.speed = (howMany == 4) ? Wire.read() : LAYER_SPEED_FULL;
+            i2c_layer_target_write.valid = true;
+          }
+        } else if (current_register == REG_LAYER_HAPTIC_CONFIG) {
+          if (howMany == 4) {
+            // Write: 2 bytes config (big-endian)
+            // Copy data to volatile struct for main loop to process
+            i2c_layer_haptic_write.layer = layer;
+            i2c_layer_haptic_write.config = ((uint16_t)Wire.read() << 8) | Wire.read();
+            i2c_layer_haptic_write.valid = true;
+          }
+        } else if (howMany == 2 + HAPTIC_PLACED_NOTCHES_MAX) {
+          // Write: the positions. Applied here: a position is one byte, and a
+          // tick seeing a part of the write is a stale notch for that tick
+          // under a hand, nothing more.
+          for (uint8_t i = 0; i < HAPTIC_PLACED_NOTCHES_MAX; i++) layer_notches[layer][i] = Wire.read();
+        }
       }
       break;
     case REG_IDLE_DURATION:
@@ -788,13 +798,21 @@ void begin_remote_move() {
   set_mode(MODE_REMOTE_MOVEMENT_IN_PROGRESS);
 }
 
+// A layer position (0-255 across the calibrated travel) in ADC counts. One
+// function, not one macro per use: the app has little flash left.
+__attribute__((noinline)) static uint16_t layer_position_to_adc(uint8_t position) {
+  return BOUNDED_LERP_UINT16(position, 0, 255, input_calib_min, input_calib_max);
+}
+
+// And back, from ADC counts to a layer position.
+__attribute__((noinline)) static uint8_t adc_to_layer_position(uint16_t adc) {
+  return BOUNDED_LERP_UINT16(adc, input_calib_min, input_calib_max, 0, 255);
+}
+
 // Apply layer change and start movement to new layer's restore position
 void apply_layer_change(uint8_t new_layer) {
   // Start movement to new layer's restore position
-  target_adc = BOUNDED_LERP_UINT16(
-    layer_restore_positions[new_layer], 0, 255,
-    input_calib_min, input_calib_max
-  );
+  target_adc = layer_position_to_adc(layer_restore_positions[new_layer]);
   apply_move_speed(layer_speeds[new_layer]);
   begin_remote_move();
 
@@ -816,7 +834,7 @@ void write_layer_target(uint8_t layer, uint8_t target) {
     Mode mode = get_mode();
     if (mode == MODE_INPUT_IDLE || mode == MODE_REMOTE_MOVEMENT_IN_PROGRESS) {
       layer_restore_positions[layer] = target;
-      target_adc = BOUNDED_LERP_UINT16(target, 0, 255, input_calib_min, input_calib_max);
+      target_adc = layer_position_to_adc(target);
       apply_move_speed(layer_speeds[layer]);
       begin_remote_move();
     }
@@ -828,8 +846,6 @@ void write_layer_target(uint8_t layer, uint8_t target) {
 
 // Write haptic configuration to a specific layer (16-bit format)
 void write_layer_haptic_config(uint8_t layer, uint16_t config) {
-  if (layer > 7) return;
-
   // Validate haptic configuration (haptic_notch.h): reject a bad detent
   // count or notch width
   if (!haptic_config_valid(config)) return;
@@ -1090,8 +1106,7 @@ void motor_update() {
     case MODE_INPUT_ACTIVE:
       // Continuously update active layer's restore position
       {
-        uint8_t current_pos = BOUNDED_LERP_UINT16(position, input_calib_min, input_calib_max, 0, 255);
-        layer_restore_positions[active_layer] = current_pos;
+        layer_restore_positions[active_layer] = adc_to_layer_position(position);
       }
 
       if (now > input_last_change_millis + idle_duration_ms && (state & STATE_TOUCH_bm) == 0 && now > touch_state_change_millis + idle_duration_ms) {
@@ -1141,6 +1156,14 @@ void motor_update() {
                 haptic_config, haptic_step_notch_held((state & STATE_TOUCH_bm) != 0, now - touch_state_change_millis));
           }
           target = get_nearest_detent_position(detent_count, input_ewma);
+        } else if (haptic_mode == HAPTIC_PLACED_NOTCHES) {
+          // Placed notches: only under the hand, released no force at all, so
+          // a fader let go stays where it is and its value does not change
+          half_width = haptic_placed_notch_half_width(haptic_config, (state & STATE_TOUCH_bm) != 0);
+          if (half_width == 0) pull = false;
+          // (the restore position is the fader's, updated just above)
+          target = layer_position_to_adc(haptic_placed_notch_nearest(layer_notches[active_layer], detent_count,
+                                                                     layer_restore_positions[active_layer]));
         } else {
           // No haptics for NO_HAPTICS mode (and an unknown mode)
           pull = false;
@@ -1186,8 +1209,7 @@ void motor_update() {
           // the carriage goes back to where the layer wanted it - re-lerped,
           // since target_adc came from the bounds we have just replaced.
           saveCalibration();
-          target_adc = BOUNDED_LERP_UINT16(layer_restore_positions[active_layer],
-                                           0, 255, input_calib_min, input_calib_max);
+          target_adc = layer_position_to_adc(layer_restore_positions[active_layer]);
           begin_remote_move();
           break;
       }
@@ -1195,7 +1217,7 @@ void motor_update() {
   }
 
   // TODO: lerp bounds...
-  uint8_t pos = BOUNDED_LERP_UINT16(position, input_calib_min, input_calib_max, 0, 255);
+  uint8_t pos = adc_to_layer_position(position);
   state &= ~STATE_POSITION_bm;
   state |= pos << STATE_POSITION_bp;
 
@@ -1257,18 +1279,13 @@ void setup() {
   (void)have_calibration;
 #endif
 
-  // Initialize all layers with default configuration (Protocol v5+)
+  // Initialize all layers with default configuration (Protocol v5+). The rest
+  // of the layer state starts as the startup code leaves it (0: layer 0,
+  // HAPTIC_NO_HAPTICS, notches at 0; the app has little flash left).
   for (uint8_t i = 0; i < 8; i++) {
-    layer_haptic_configs[i] = 0;  // Default: HAPTIC_NO_HAPTICS (smooth mode), all bits 0
     layer_restore_positions[i] = 128;  // Default: midpoint
     layer_speeds[i] = LAYER_SPEED_FULL;
   }
-  active_layer = 0;
-  pending_layer_change = 0xFF;  // No pending change
-  queried_layer = 0;
-
-  // Load active layer's haptic config into global haptic_config
-  haptic_config = layer_haptic_configs[0];
 
   setup_i2c();
 

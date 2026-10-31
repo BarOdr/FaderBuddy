@@ -229,6 +229,7 @@ The FaderBuddy firmware internally handles the closed loop motor control, presen
   - Configurable detents (1-10 positions)
   - Centre notch (firmware 1.6+): a light pull to the centre only within a window around it (half-width 1-15 units of 8 ADC counts; 6 recommended), free outside
   - Step notches (firmware 1.7+): 2-10 steps; under the hand a notch at each step (half-width 1-15 units of 8 ADC counts) and free between, released a pull to the nearest step
+  - Placed notches (firmware 1.8+): 1-4 notches at given positions (`REG_LAYER_NOTCHES`), felt only while the fader is touched; released it applies no force, so the fader stays where it was let go
 
 Configuration of a FaderBuddy supports up to 8 virtual "layers", which allow a single fader to be used for multiple purposes (e.g. controlling lamp brightness and fan speed), with the host controller able
 to send a single command to switch to a different layer. Switching layers restores the previous
