@@ -138,6 +138,8 @@ uint16_t control_tick_period_us = CONTROL_TICK_US;  // runtime-tunable for sweep
 #endif
 
 // Touch state
+// Below this reading the PTC library starts counting towards a release.
+static constexpr int16_t TOUCH_RELEASE_DELTA = 50;
 cap_sensor_t touch_sensor;
 uint16_t touch_recal_count = 0;  // Count of touch recalibrations since boot
 
@@ -1159,7 +1161,9 @@ void motor_update() {
         } else if (haptic_mode == HAPTIC_PLACED_NOTCHES) {
           // Placed notches: only under the hand, released no force at all, so
           // a fader let go stays where it is and its value does not change
-          half_width = haptic_placed_notch_half_width(haptic_config, (state & STATE_TOUCH_bm) != 0);
+          half_width = haptic_placed_notch_half_width(
+              haptic_config, haptic_placed_notch_under_hand((state & STATE_TOUCH_bm) != 0,
+                                                            ptc_get_node_delta(&touch_sensor), TOUCH_RELEASE_DELTA));
           if (half_width == 0) pull = false;
           // (the restore position is the fader's, updated just above)
           target = layer_position_to_adc(haptic_placed_notch_nearest(layer_notches[active_layer], detent_count,
@@ -1241,7 +1245,7 @@ void motor_update() {
 
 void setup_touch() {
   ptc_add_selfcap_node(&touch_sensor, PIN_TO_PTC(PIN_TOUCH), 0);
-  ptc_node_set_thresholds(&touch_sensor, 200, 50);
+  ptc_node_set_thresholds(&touch_sensor, 200, TOUCH_RELEASE_DELTA);
   ptc_node_set_gain(&touch_sensor, ADC_SAMPNUM_ACC1_gc, ADC_SAMPNUM_ACC1_gc);
 
   ptc_lib_sm_set_t* settings = ptc_get_sm_settings();

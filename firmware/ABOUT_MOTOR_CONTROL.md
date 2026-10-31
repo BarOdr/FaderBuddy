@@ -261,7 +261,7 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
     deadband/8 + 2 units (4-6 is the planned range).
   - Stall exposure is as for detents, but only within a notch while held.
 - **Placed notches exist only under the hand** (`HAPTIC_PLACED_NOTCHES`,
-  `haptic_placed_notch_half_width()`, `haptic_placed_notch_target()`). Up to
+  `haptic_placed_notch_half_width()`, `haptic_placed_notch_nearest()`). Up to
   four positions from `REG_LAYER_NOTCHES`, on the scale of `REG_LAYER_TARGET`,
   for a continuous control with places worth finding by feel. While the fader
   is touched each is a notch, shaped as the centre notch, with the same
@@ -270,12 +270,18 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
   pull to the nearest notch, because a released fader must not move and the
   value must not change. So a fader let go inside a notch stays off its centre
   where the hand left it.
-  - The bit is `STATE_TOUCH`, with no delay on purpose. A PTC release glitch
-    drops the pull for that tick, which is a weaker pull under a hand, not a
-    kick. The other way round is what needs a look on hardware: touch release
-    detection lags the finger by a few ms, so the pull can outlast the hand
-    for that long. A fader that moved then moved honestly, and the value
-    follows it (to be checked on the mule: decision 0143's HIL).
+  - The test is `STATE_TOUCH` and the latest reading still at or above the
+    release threshold (`haptic_placed_notch_under_hand()`), with no delay on
+    purpose. `STATE_TOUCH` alone clears only after two more acquisitions (40 ms
+    and more at the library's 20 ms period), long enough to slide a fader held
+    on a notch's slope; the reading ends the pull at the first low
+    acquisition, so up to about 20 ms after the capacitance falls, plus how long
+    that takes as the finger lifts. A dip in the reading drops the pull for
+    that acquisition, which is a weaker pull under a hand, not a kick. Whether
+    what is left moves a fader lifted from a slope is to be checked on the mule
+    (decision 0143's HIL); a fader that moved then moved honestly, and the
+    value follows it. A touch bit stuck on with no hand (decision 0089) is the
+    known limit, as for modes 3 and 4.
   - Spacing: two notches overlap when they are closer than twice the
     half-width (96 counts at width 6, about a tenth of the travel), and the
     nearest wins between them with a sign flip at the midpoint. Hosts keep

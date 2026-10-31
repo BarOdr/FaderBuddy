@@ -80,8 +80,14 @@ static inline bool haptic_step_notch_held(bool touched, uint32_t ms_since_touch_
   return touched || ms_since_touch_change <= HAPTIC_STEP_RELEASE_SETTLE_MS;
 }
 
-// Stub until the test has run RED.
-static inline bool haptic_placed_notch_under_hand(bool touched, int16_t, int16_t) { return touched; }
+// Whether a hand is on the fader as far as HAPTIC_PLACED_NOTCHES is concerned:
+// the touch bit, and the latest reading still at or above the release
+// threshold. The bit alone stays set for two more acquisitions after the
+// reading falls (decision 0143: at 20 ms each, 40 ms and more), long enough for
+// the motor to slide a fader held on a notch's slope with no hand on it.
+static inline bool haptic_placed_notch_under_hand(bool touched, int16_t delta, int16_t release_delta) {
+  return touched && delta >= release_delta;
+}
 
 // The window HAPTIC_PLACED_NOTCHES pulls within: the config's
 // HAPTIC_NOTCH_WIDTH field while the fader is touched, and no window at all
