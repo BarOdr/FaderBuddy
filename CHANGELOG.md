@@ -89,6 +89,19 @@ for production purposes.
   is rejected, as are fewer than 2 or more than 10 steps). Firmware version
   1.7 (`FW_VERSION_STEP_NOTCHES`); older firmware coasts on mode 4, so the
   protocol version is unchanged.
+- New haptic mode `HAPTIC_PLACED_NOTCHES` (5), for a continuous control with
+  places worth finding by feel: 1-4 notches at given positions, from the new
+  layer-addressed register `REG_LAYER_NOTCHES` (0x14, four bytes on the scale
+  of `REG_LAYER_TARGET`; write them before the config). The pull acts only
+  while the fader is touched, within the `HAPTIC_NOTCH_WIDTH` half-width of the
+  nearest notch; released it applies no force at all, so a fader let go stays
+  where it is and its value does not change. A count outside 1-4 or a width of
+  0 is rejected. Firmware version 1.8 (`FW_VERSION_PLACED_NOTCHES`); older
+  firmware coasts on mode 5, so the protocol version is unchanged.
+  The room came from folding the repeated position conversions into two
+  functions, sharing the layer-addressed I2C decoding and dropping startup
+  assignments of what the startup code already zeroes: the app is 14792 B
+  (14656 -> 14792), 54 B below the 14846 B limit.
 - The application links with relaxation (`-Wl,--relax`, as megaTinyCore's
   own build does) to make room: relaxation saves about 290 bytes, so with
   mode 4 and its release guard the app is about 188 bytes smaller than in

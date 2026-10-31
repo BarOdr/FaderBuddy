@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (7)
+#define FW_VERSION_MINOR (8)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -83,6 +83,11 @@
 // firmware stores the config but coasts on the unknown mode, as for the
 // centre notch; no protocol-version bump.
 #define FW_VERSION_STEP_NOTCHES (0x0107)  // 1.7
+
+// Minimum firmware version that implements HAPTIC_PLACED_NOTCHES and
+// REG_LAYER_NOTCHES. Older firmware stores the config but coasts on the
+// unknown mode, so a fader there stays free; no protocol-version bump.
+#define FW_VERSION_PLACED_NOTCHES (0x0108)  // 1.8
 
 
 /*
@@ -131,7 +136,9 @@
  * -----|---------------------|---------|------|------------
  * 0x13 | IDLE_DURATION       | R/W     | u16  | Input idle time in ms (see below)
  * -----|---------------------|---------|------|------------
- * 0x14 | ...                 |         |      | (free - next production register goes here)
+ * 0x14 | LAYER_NOTCHES       | R/W     |u8[4] | Placed notch positions (layer-addressed, see below; FW 1.8+)
+ * -----|---------------------|---------|------|------------
+ * 0x15 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -184,6 +191,23 @@
 #define REG_FW_VERSION 0x11  // Application firmware version (R, u16 big-endian, see FW_VERSION)
 #define REG_MOTOR_CAL 0x12  // Measured motor characteristics (R, 12 bytes, see below)
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
+#define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
+
+/*
+ * REG_LAYER_NOTCHES (0x14) - read/write, layer-addressed, FW 1.8+.
+ *
+ * The positions HAPTIC_PLACED_NOTCHES pulls to, HAPTIC_PLACED_NOTCHES_MAX
+ * bytes per layer, on the scale of REG_LAYER_TARGET: 0-255 across the
+ * calibrated travel. A write is [reg, layer, p0, p1, p2, p3] and is taken
+ * whole or not at all; a read is [reg, layer], then four bytes. The config's
+ * count field says how many of the four are used, in any order; the rest are
+ * ignored but read back as written. A power-up leaves them 0.
+ *
+ * Write the positions before the config, so a fader does not feel a notch at
+ * the layer's previous positions. They take effect at once, also while the
+ * mode is active.
+ */
+#define HAPTIC_PLACED_NOTCHES_MAX 4
 
 /*
  * REG_IDLE_DURATION (0x13) - read/write, u16 big-endian, milliseconds.
@@ -406,6 +430,7 @@ enum HapticMode : uint8_t {
   HAPTIC_DETENTS                 = 2,
   HAPTIC_CENTRE_NOTCH            = 3,  // FW 1.6+; older firmware coasts (see below)
   HAPTIC_STEP_NOTCHES            = 4,  // FW 1.7+; older firmware coasts (see below)
+  HAPTIC_PLACED_NOTCHES          = 5,  // FW 1.8+; older firmware coasts (see below)
 };
 
 
@@ -497,6 +522,14 @@ enum HapticMode : uint8_t {
 // so a width of 1-2 (8-16 counts) never pulls under the hand on a fader whose
 // deadband is 16-20 counts; keep it at least deadband/8 + 2. Other modes
 // ignore the field (it is not checked); hosts should send 0.
+//
+// HAPTIC_PLACED_NOTCHES uses the same field for the half-width of its notches,
+// with the same limits, and the count field for how many of the
+// REG_LAYER_NOTCHES positions it uses (1-4). It pulls only while the fader is
+// touched, to the nearest of them, within this half-width, and is free between
+// them. Released it applies no force at all, with no settle time as the step
+// notches have, so a fader let go stays where it is and the value does not
+// change.
 #define HAPTIC_NOTCH_WIDTH_bp       (10)
 #define HAPTIC_NOTCH_WIDTH_bs       (4)
 #define HAPTIC_NOTCH_WIDTH_bm       (((1U << HAPTIC_NOTCH_WIDTH_bs) - 1) << HAPTIC_NOTCH_WIDTH_bp)

@@ -185,8 +185,8 @@ unset.
 ## Haptics
 
 Haptics are not a second controller. `haptic_pull()` picks a target - the
-nearest detent, the calibrated end within `HAPTIC_MAGNET_RANGE` of it, or the
-calibrated midpoint for the centre notch -
+nearest detent, the calibrated end within `HAPTIC_MAGNET_RANGE` of it, the
+calibrated midpoint for the centre notch, or the nearest placed notch -
 and hands the error to the same `control_law()` a remote move uses, with no
 speed limit, no stall ramp and no take-up ceiling. Only two things differ:
 
@@ -260,6 +260,33 @@ speed limit, no stall ramp and no take-up ceiling. Only two things differ:
     release snap remains, as for the centre notch. Keep the width at least
     deadband/8 + 2 units (4-6 is the planned range).
   - Stall exposure is as for detents, but only within a notch while held.
+- **Placed notches exist only under the hand** (`HAPTIC_PLACED_NOTCHES`,
+  `haptic_placed_notch_half_width()`, `haptic_placed_notch_nearest()`). Up to
+  four positions from `REG_LAYER_NOTCHES`, on the scale of `REG_LAYER_TARGET`,
+  for a continuous control with places worth finding by feel. While the fader
+  is touched each is a notch, shaped as the centre notch, with the same
+  half-width field as the step notches. Untouched there is no window at all
+  and the motor coasts: not a settle time, as the step notches have, and not a
+  pull to the nearest notch, because a released fader must not move and the
+  value must not change. So a fader let go inside a notch stays off its centre
+  where the hand left it.
+  - The test is `STATE_TOUCH` and the latest reading still at or above the
+    release threshold (`haptic_placed_notch_under_hand()`), with no delay on
+    purpose. `STATE_TOUCH` alone clears only after two more acquisitions (40 ms
+    and more at the library's 20 ms period), long enough to slide a fader held
+    on a notch's slope; the reading ends the pull at the first low
+    acquisition, so up to about 20 ms after the capacitance falls, plus how long
+    that takes as the finger lifts. A dip in the reading drops the pull for
+    that acquisition, which is a weaker pull under a hand, not a kick. Whether
+    what is left moves a fader lifted from a slope is to be checked on the mule
+    (decision 0143's HIL); a fader that moved then moved honestly, and the
+    value follows it. A touch bit stuck on with no hand (decision 0089) is the
+    known limit, as for modes 3 and 4.
+  - Spacing: two notches overlap when they are closer than twice the
+    half-width (96 counts at width 6, about a tenth of the travel), and the
+    nearest wins between them with a sign flip at the midpoint. Hosts keep
+    them further apart.
+  - Stall exposure is as for the step notches under the hand; none released.
 
 The previous haptics were `150 + 3 * error` with no velocity term - far above
 breakaway right up to the dead zone, so a released fader arrived fast, sailed
