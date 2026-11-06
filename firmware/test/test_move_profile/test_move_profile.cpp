@@ -10,6 +10,7 @@
 
 #include <unity.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -192,8 +193,10 @@ static Retarget no_retarget() {
 }
 
 static void print_sim(const char* name, const Sim& s) {
+  // a move that ends inside the deadband short of 90% has no 10-90 time
+  unsigned long t1090 = (s.t90_us > s.t10_us) ? (s.t90_us - s.t10_us) / 1000 : 0;
   printf("  %-26s arrived=%d t=%lu ms 10-90=%lu ms overshoot=%ld peak=%ld floor=%ld jump=%ld first_drive=%ld\n", name,
-         (int)s.arrived, (unsigned long)(s.arrival_us / 1000), (unsigned long)((s.t90_us - s.t10_us) / 1000),
+         (int)s.arrived, (unsigned long)(s.arrival_us / 1000), t1090,
          (long)s.overshoot, (long)s.peak_vref, (long)s.vref_floor, (long)s.vref_jump, (long)s.first_drive);
 }
 
@@ -257,13 +260,13 @@ void test_falling_move_mirrors_a_rising_one() {
 }
 
 void test_brakes_to_the_floor_at_the_deadband() {
-  // With the reference at speed and only a little error left, the planner
-  // must come down at its deceleration and sit on the floor, never below.
+  // At the deadband's edge nothing is left to brake over: a reference at
+  // speed comes down at its deceleration and sits on the floor, never below.
   MoveProfile p = {0, 0};
   move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, false);
   p.v_q8 = (int32_t)4000 << MOVE_POS_SHIFT;
   uint32_t accel = p.accel;
-  int32_t error_q8 = (int32_t)(DEADBAND + 2) << MOVE_POS_SHIFT;
+  int32_t error_q8 = (int32_t)DEADBAND << MOVE_POS_SHIFT;
   int32_t last = 4000;
   for (int i = 0; i < 200; i++) {
     int32_t v = move_profile_step(p, error_q8, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
@@ -273,6 +276,15 @@ void test_brakes_to_the_floor_at_the_deadband() {
     last = v;
   }
   TEST_ASSERT_EQUAL_INT32(VEL_MIN, last);
+  // With error left it holds on the braking curve, the speed from which the
+  // floor is reached at the deceleration over what is left: within a step.
+  p.v_q8 = (int32_t)4000 << MOVE_POS_SHIFT;
+  int32_t v = 0;
+  for (int i = 0; i < 200; i++) {
+    v = move_profile_step(p, (int32_t)(DEADBAND + 2) << MOVE_POS_SHIFT, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  }
+  int32_t curve = (int32_t)sqrt((double)VEL_MIN * VEL_MIN + 2.0 * accel * 2);
+  TEST_ASSERT_INT32_WITHIN(max_step(accel), curve, v);
 }
 
 void test_wrong_way_reference_restarts_at_the_floor() {
@@ -371,12 +383,16 @@ void test_simulated_durations_are_about_independent_of_distance() {
   Sim full = simulate(10, 1013, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget());
   Sim small = simulate(500, 520, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget());
   Sim tiny = simulate(500, 510, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget());
+  Sim legacy_quarter = simulate(100, 356, TIME_MS, MOVE_VEL_UNLIMITED, true, no_retarget());
+  Sim legacy_half = simulate(100, 612, TIME_MS, MOVE_VEL_UNLIMITED, true, no_retarget());
   printf("\ndistance, T=%d ms:\n", TIME_MS);
   print_sim("quarter (256)", quarter);
   print_sim("half (512)", half);
   print_sim("full (1003)", full);
   print_sim("small (20)", small);
   print_sim("tiny (10)", tiny);
+  print_sim("fast (legacy) quarter", legacy_quarter);
+  print_sim("fast (legacy) half", legacy_half);
   TEST_ASSERT_TRUE(quarter.arrived && half.arrived && full.arrived && small.arrived && tiny.arrived);
   // quarter and half are both under the plant's top speed: the same time
   TEST_ASSERT_UINT32_WITHIN(half.arrival_us / 4, half.arrival_us, quarter.arrival_us);

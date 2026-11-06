@@ -60,9 +60,12 @@ struct MoveProfile {
 // The acceleration that moves `distance` counts in `time_ms` with a velocity
 // triangle: 4 * distance / time^2, clamped to MOVE_PROFILE_ACCEL_MAX.
 static inline uint32_t move_profile_accel(uint16_t distance, uint16_t time_ms) {
-  (void)distance;
-  (void)time_ms;
-  return 0;
+  if (time_ms == 0) return MOVE_PROFILE_ACCEL_MAX;
+  // 4 * d * 1e6 / T^2 counts/s^2: d * 2e6 is at most 2.05e9, in two halves
+  // so it never leaves 32 bits; T^2 is at most 4e6.
+  uint32_t t2 = (uint32_t)time_ms * time_ms;
+  uint32_t a = ((2000000UL * distance) / t2) * 2UL;
+  return (a > MOVE_PROFILE_ACCEL_MAX) ? MOVE_PROFILE_ACCEL_MAX : a;
 }
 
 // Plan toward a new target `error_q8` (target - position) away. A fresh move,
@@ -72,11 +75,16 @@ static inline uint32_t move_profile_accel(uint16_t distance, uint16_t time_ms) {
 // larger of its acceleration and the new one, so a nearer target is still
 // braked for in time.
 static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t time_ms, uint16_t vel_min, bool continuing) {
-  (void)p;
-  (void)error_q8;
-  (void)time_ms;
-  (void)vel_min;
-  (void)continuing;
+  bool rising = error_q8 > 0;
+  int32_t mag_q8 = rising ? error_q8 : -error_q8;
+  uint32_t accel = move_profile_accel((uint16_t)(mag_q8 >> MOVE_POS_SHIFT), time_ms);
+  if (continuing && p.v_q8 != 0) {
+    if (accel > p.accel) p.accel = accel;
+  } else {
+    p.accel = accel;
+    p.v_q8 = (int32_t)vel_min << MOVE_POS_SHIFT;
+    if (!rising) p.v_q8 = -p.v_q8;
+  }
 }
 
 // Advance the plan by one control tick of `dt_us` and return the velocity
@@ -89,16 +97,40 @@ static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t t
 // without a new aim, an overshoot past the deadband) restarts at the floor.
 static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint32_t dt_us,
                                         uint16_t max_velocity, uint16_t vel_min, int16_t deadband) {
-  (void)p;
-  (void)error_q8;
-  (void)dt_us;
-  (void)max_velocity;
-  (void)vel_min;
-  (void)deadband;
-  return 0;
+  if (dt_us > MOVE_DT_MAX_US) dt_us = MOVE_DT_MAX_US;
+  bool rising = error_q8 > 0;
+  int32_t floor_q8 = (int32_t)vel_min << MOVE_POS_SHIFT;
+  // A reference the wrong way, or none: start over at the floor, as
+  // move_vref would hand out for this error.
+  if (p.v_q8 == 0 || (p.v_q8 > 0) != rising) p.v_q8 = rising ? floor_q8 : -floor_q8;
+  int32_t mag_q8 = rising ? p.v_q8 : -p.v_q8;
+  int32_t mag = mag_q8 >> MOVE_POS_SHIFT;
+  // The error left before the deadband, whole counts.
+  int32_t remaining = ((rising ? error_q8 : -error_q8) >> MOVE_POS_SHIFT) - deadband;
+  if (remaining < 0) remaining = 0;
+  // Brake when the reference could not reach the floor within what is left:
+  // v^2 - vmin^2 >= 2 * a * remaining (so the floor at the edge holds). v and vmin are within the cap, so their
+  // squares are under 2^28; 2 * a * remaining is under 2^31 (ACCEL_MAX).
+  uint32_t vmin = (vel_min > MOVE_PROFILE_VEL_CAP) ? (uint32_t)MOVE_PROFILE_VEL_CAP : vel_min;
+  uint32_t stop = (uint32_t)mag * (uint32_t)mag;
+  uint32_t room = vmin * vmin + 2UL * p.accel * (uint32_t)remaining;
+  // The acceleration over this tick, Q8: a * dt / 1e6 * 256 = a * dt / 3906.25;
+  // (a >> 4) * dt is under 2^29 and 244 is 3906.25 / 16 to 0.06%.
+  int32_t step_q8 = (int32_t)(((p.accel >> 4) * dt_us) / 244UL);
+  if (stop >= room) {
+    mag_q8 -= step_q8;
+  } else {
+    mag_q8 += step_q8;
+  }
+  int32_t cap_q8 = (int32_t)MOVE_PROFILE_VEL_CAP << MOVE_POS_SHIFT;
+  if (max_velocity != 0 && ((int32_t)max_velocity << MOVE_POS_SHIFT) < cap_q8) cap_q8 = (int32_t)max_velocity << MOVE_POS_SHIFT;
+  if (mag_q8 > cap_q8) mag_q8 = cap_q8;
+  if (mag_q8 < floor_q8) mag_q8 = floor_q8;
+  p.v_q8 = rising ? mag_q8 : -mag_q8;
+  return rising ? (mag_q8 >> MOVE_POS_SHIFT) : -(mag_q8 >> MOVE_POS_SHIFT);
 }
 
 // Forget the plan when a move ends, so the next one starts at the floor.
 static inline void move_profile_end(MoveProfile& p) {
-  (void)p;
+  p.v_q8 = 0;
 }
