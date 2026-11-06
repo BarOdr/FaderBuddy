@@ -341,6 +341,50 @@ void test_stall_ramp_and_ceiling_integrate_like_the_float_ramps() {
 // Q8 to whole counts, as a float cast truncates
 // ---------------------------------------------------------------------------
 
+// The lab's REG_DEBUG_GAINS can set the slope, kv and k independently, and
+// move_drive's products must stay in 32 bits for every combination it allows.
+// The slope is the one that has to be clamped: at the lab's largest kv
+// (16383) and smallest k (2, inv_k 32768) a slope of 96 pushes both products
+// past 2^31 and the drive wraps to the wrong sign, which the float law never
+// did. Within the clamp the law is still the float law.
+static float ref_law_with_slope(float error, float slope, float velocity_ewma, const RefGains& g) {
+  float sign = (error > 0) ? 1.0f : -1.0f;
+  float mag = slope * error * sign;
+  if (mag < g.vel_min) mag = g.vel_min;
+  uint8_t d = (error > 0) ? MOTORCAL_RISING : MOTORCAL_FALLING;
+  return sign * (g.bd[d] + mag * g.inv_k[d]) + g.kv * (sign * mag - velocity_ewma);
+}
+
+void test_lab_slope_is_clamped_where_the_law_stays_exact() {
+  TEST_ASSERT_EQUAL_UINT16(50, move_law_slope_from_wire(50000));
+  TEST_ASSERT_EQUAL_UINT16(MOVE_VREF_SLOPE_MAX, move_law_slope_from_wire(96000));
+  TEST_ASSERT_EQUAL_UINT16(MOVE_VREF_SLOPE_MAX, move_law_slope_from_wire(0xFFFFFFFFUL));
+  TEST_ASSERT_EQUAL_UINT16(0, move_law_slope_from_wire(999));
+  // the lab's extremes at the clamped slope, against the float law
+  MoveLaw fg;
+  fg.bd[0] = 86; fg.bd[1] = 68;
+  fg.inv_k_q16[0] = fg.inv_k_q16[1] = move_inv_k_q16(2);
+  fg.kv_q16 = 16383;
+  fg.vel_min = 560; fg.deadband = 8; fg.takeup_duty = 130;
+  RefGains rg;
+  rg.bd[0] = 86; rg.bd[1] = 68;
+  rg.inv_k[0] = rg.inv_k[1] = 0.5f;
+  rg.kv = 16383 / 65536.0f;
+  rg.vel_min = 560;
+  int32_t worst = 0;
+  for (int32_t error_q8 = -1023 * MOVE_POS_ONE; error_q8 <= 1023 * MOVE_POS_ONE; error_q8 += 1023) {
+    for (int32_t velocity = -MOVE_VEL_CLAMP; velocity <= MOVE_VEL_CLAMP; velocity += 4681) {
+      float ref = ref_law_with_slope(error_q8 / 256.0f, MOVE_VREF_SLOPE_MAX, velocity, rg);
+      int16_t ref_duty = clamp_duty((int16_t)(ref > 32767.0f ? 32767.0f : (ref < -32767.0f ? -32767.0f : ref)));
+      int32_t v_ref = move_vref(error_q8, MOVE_VREF_SLOPE_MAX, 0, 560);
+      int16_t duty = clamp_duty(move_drive(v_ref, velocity, fg));
+      int32_t dev = labs((long)ref_duty - duty);
+      if (dev > worst) worst = dev;
+    }
+  }
+  TEST_ASSERT_TRUE(worst <= 1);
+}
+
 void test_q8_to_int_truncates_toward_zero() {
   TEST_ASSERT_EQUAL_INT16(0, move_q8_to_int(0));
   TEST_ASSERT_EQUAL_INT16(0, move_q8_to_int(255));
@@ -363,6 +407,7 @@ int main() {
   RUN_TEST(test_gain_derivation_matches_the_float_derivation);
   RUN_TEST(test_ramp_step_matches_rate_times_dt);
   RUN_TEST(test_stall_ramp_and_ceiling_integrate_like_the_float_ramps);
+  RUN_TEST(test_lab_slope_is_clamped_where_the_law_stays_exact);
   RUN_TEST(test_q8_to_int_truncates_toward_zero);
   return UNITY_END();
 }

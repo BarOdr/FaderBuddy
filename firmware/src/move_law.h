@@ -115,6 +115,15 @@ static inline int32_t move_velocity_filter(int32_t velocity, int32_t dpos_q8, ui
   return velocity + (((dv - velocity) * (int32_t)alpha_q12 + 2048L) >> 12);
 }
 
+// The largest slope a host may set at runtime (the lab's REG_DEBUG_GAINS):
+// what keeps move_drive's products in 32 bits at the lab's other extremes.
+#define MOVE_VREF_SLOPE_MAX (60)
+
+// The slope a REG_DEBUG_GAINS write of `per_mille` (slope x 1000) selects.
+static inline uint16_t move_law_slope_from_wire(uint32_t per_mille) {
+  return (uint16_t)(per_mille / 1000UL);  // stub: not clamped yet
+}
+
 // Position loop: the signed velocity reference for `error_q8`
 // (target - position): slope * error, capped at `max_velocity` when that is
 // not 0 (MOVE_VEL_UNLIMITED), never below `vel_min` in magnitude.
