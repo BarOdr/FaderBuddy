@@ -827,7 +827,7 @@ void begin_remote_move() {
   }
   // The smooth profile plans the same way: a reversal or a fresh move starts
   // at the floor, a retarget on the way carries the reference on.
-  move_profile_aim(move_profile, error_q8, move_profile_time_ms, move_law.vel_min, continuing);
+  move_profile_aim(move_profile, error_q8, move_profile_time_ms, move_law.vel_min, move_law.deadband, continuing);
   move_direction = dir;
   remote_movement_start = now;
   remote_movement_start_position = move_q8_to_int(input_pos_q8);
@@ -933,6 +933,8 @@ void apply_move_speed(uint8_t speed) {
   static_assert(1000 % MOVE_SPEED_FASTEST_MS == 0,
                 "MOVE_SPEED_FASTEST_MS must divide 1000 exactly, or use 32-bit math here");
   static_assert(1023UL * (1000 / MOVE_SPEED_FASTEST_MS) <= 65535UL, "span scaling overflows");
+  // The smooth profile relies on the limit staying within its velocity cap.
+  static_assert(1023UL * (1000 / MOVE_SPEED_FASTEST_MS) <= MOVE_PROFILE_VEL_CAP, "speed limit exceeds the profile's cap");
   uint16_t fastest = span * (1000 / MOVE_SPEED_FASTEST_MS);
   uint16_t adc_per_sec =
       slowest + (uint16_t)(((uint32_t)(fastest - slowest) * speed) / (LAYER_SPEED_FULL - 1));
@@ -949,8 +951,14 @@ void apply_move_speed(uint8_t speed) {
 // inverted) plus feedback. Returns signed slow-decay duty, unclamped; the
 // caller owns the deadband and the drive ceiling. Fixed point: move_law.h.
 // See "The control law" in ABOUT_MOTOR_CONTROL.md for the derivation.
-static int16_t control_law(int32_t error_q8, uint16_t max_velocity) {
-  int32_t v_ref = move_vref(error_q8, move_vref_slope, max_velocity, move_law.vel_min);
+//
+// A `smooth` move takes its velocity reference from the profile's plan
+// (move_profile.h) in place of the proportional one; the haptics and the
+// fast profile keep the proportional one. One function for both, so that
+// the velocity loop is in the flash once (the ATtiny's is nearly full).
+static int16_t control_law(int32_t error_q8, uint16_t max_velocity, bool smooth) {
+  int32_t v_ref = smooth ? move_profile_step(move_profile, error_q8, max_velocity, move_law.vel_min, move_law.deadband)
+                         : move_vref(error_q8, move_vref_slope, max_velocity, move_law.vel_min);
   return move_drive(v_ref, velocity_est, move_law);
 }
 
@@ -965,7 +973,7 @@ static int16_t control_law(int32_t error_q8, uint16_t max_velocity) {
 // anywhere and leave it at its default.
 static void haptic_pull(uint16_t target, int16_t limit, int16_t half_width) {
   int32_t error_q8 = ((int32_t)target << MOVE_POS_SHIFT) - input_pos_q8;
-  int16_t drive = control_law(error_q8, MOVE_VEL_UNLIMITED);
+  int16_t drive = control_law(error_q8, MOVE_VEL_UNLIMITED, false);
   if (drive > limit) drive = limit;
   if (drive < -limit) drive = -limit;
   motor_set(haptic_shape(move_q8_to_int(error_q8), move_law.deadband, half_width, drive), true, MOTOR_IDLE_COAST);
@@ -1092,11 +1100,9 @@ void motor_update() {
           // position loop's proportional one (the fast profile, the move of
           // firmware up to 1.8). Then the shared velocity loop plus the stall
           // escape, signed toward the target.
-          int32_t v_ref = (move_profile_mode == MOVE_PROFILE_SMOOTH)
-              ? move_profile_step(move_profile, error_q8, move_max_velocity, move_law.vel_min, move_law.deadband)
-              : move_vref(error_q8, move_vref_slope, move_max_velocity, move_law.vel_min);
           int16_t ramp = move_q8_to_int(stiction_ramp_q8);
-          int32_t u = (int32_t)move_drive(v_ref, velocity_est, move_law) + ((error_q8 > 0) ? ramp : -ramp);
+          int32_t u = (int32_t)control_law(error_q8, move_max_velocity, move_profile_mode == MOVE_PROFILE_SMOOTH) +
+                      ((error_q8 > 0) ? ramp : -ramp);
 
           // Drive ceiling opens up over time from the take-up value, easing
           // the motor through belt backlash instead of stepping to full duty.
@@ -1429,9 +1435,12 @@ void process_i2c_requests() {
     i2c_idle_duration_write = 0;
   }
 
-  // Applied here too, and at once: a move under way carries its reference on
-  // under the new profile, which is what either profile would do with it.
-  if (i2c_move_profile_time != 0) {
+  // Applied between moves: a write during a move is kept until the move ends
+  // (a later write replaces it), so a move finishes under the profile it
+  // started with and the next one starts under the new. Re-planning a move
+  // under way from the speed it has would be the nicer answer; it did not
+  // fit the flash (about 300 bytes, with under 100 left).
+  if (i2c_move_profile_time != 0 && get_mode() != MODE_REMOTE_MOVEMENT_IN_PROGRESS) {
     move_profile_mode = i2c_move_profile_mode;
     move_profile_time_ms = i2c_move_profile_time;
     i2c_move_profile_time = 0;

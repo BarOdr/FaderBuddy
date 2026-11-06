@@ -78,15 +78,8 @@ struct Retarget {
   int16_t target;
 };
 
-// A REG_MOVE_PROFILE write mid-move: the profile (and move time) from then on.
-struct Switch {
-  uint32_t at_us;   // 0 = none
-  bool smooth;
-  uint16_t time_ms;
-};
-
 static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t max_velocity, bool legacy,
-                    Retarget retarget, Switch sw = {0, false, 0}) {
+                    Retarget retarget) {
   Sim s = {};
   double pos = start;        // counts
   double vel = 0;            // counts/s
@@ -98,7 +91,6 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
   bool have_last_vref = false;
   int16_t last_drive = 0;
   bool have_last_drive = false;
-  bool switched = (sw.at_us == 0);
   MoveProfile p = {0, 0};
   int16_t cur_target = target;
   int32_t error0 = (int32_t)target - start;
@@ -106,7 +98,7 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
   s.vref_floor = 0x7fffffff;
   bool retargeted = (retarget.at_us == 0);
 
-  move_profile_aim(p, ((int32_t)cur_target << MOVE_POS_SHIFT) - pos_q8, time_ms, law.vel_min, false);
+  move_profile_aim(p, ((int32_t)cur_target << MOVE_POS_SHIFT) - pos_q8, time_ms, law.vel_min, law.deadband, false);
 
   uint32_t steady_since_us = 0;
   bool in_deadband = false;
@@ -117,15 +109,8 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
       cur_target = retarget.target;
       int32_t new_err = ((int32_t)cur_target << MOVE_POS_SHIFT) - pos_q8;
       int32_t new_dir = (new_err > 0) ? 1 : -1;
-      move_profile_aim(p, new_err, time_ms, law.vel_min, new_dir == old_dir);
+      move_profile_aim(p, new_err, time_ms, law.vel_min, law.deadband, new_dir == old_dir);
       if (new_dir != old_dir) ceiling_q8 = (int32_t)TAKEUP_DUTY << MOVE_POS_SHIFT;
-    }
-    if (!switched && t >= sw.at_us) {
-      // process_i2c_requests(): between ticks, from the last tick's sensing
-      switched = true;
-      legacy = !sw.smooth;
-      time_ms = sw.time_ms;
-      move_profile_resume(p, ((int32_t)cur_target << MOVE_POS_SHIFT) - pos_q8, velocity_est, time_ms, law.vel_min);
     }
     // sensing: ADC conversions since the last tick
     for (int i = 0; i < ADC_PER_TICK; i++) {
@@ -262,7 +247,7 @@ void test_accel_is_four_d_over_t_squared() {
 void test_soft_start_ramps_from_the_floor() {
   MoveProfile p = {0, 0};
   int32_t error_q8 = (int32_t)1000 << MOVE_POS_SHIFT;
-  move_profile_aim(p, error_q8, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, error_q8, TIME_MS, VEL_MIN, DEADBAND, false);
   uint32_t accel = move_profile_accel(1000, TIME_MS);
   int32_t last = VEL_MIN - 1;
   int32_t v = 0;
@@ -283,8 +268,8 @@ void test_soft_start_ramps_from_the_floor() {
 void test_falling_move_mirrors_a_rising_one() {
   MoveProfile up = {0, 0}, down = {0, 0};
   int32_t e = (int32_t)600 << MOVE_POS_SHIFT;
-  move_profile_aim(up, e, TIME_MS, VEL_MIN, false);
-  move_profile_aim(down, -e, TIME_MS, VEL_MIN, false);
+  move_profile_aim(up, e, TIME_MS, VEL_MIN, DEADBAND, false);
+  move_profile_aim(down, -e, TIME_MS, VEL_MIN, DEADBAND, false);
   for (int i = 0; i < 100; i++) {
     int32_t vu = move_profile_step(up, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
     int32_t vd = move_profile_step(down, -e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
@@ -297,7 +282,7 @@ void test_brakes_to_the_floor_at_the_deadband() {
   // At the deadband's edge nothing is left to brake over: a reference at
   // speed comes down at its deceleration and sits on the floor, never below.
   MoveProfile p = {0, 0};
-  move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, DEADBAND, false);
   set_vref(p, 4000);
   uint32_t accel = accel_of(p);
   int32_t error_q8 = (int32_t)DEADBAND << MOVE_POS_SHIFT;
@@ -323,7 +308,7 @@ void test_brakes_to_the_floor_at_the_deadband() {
 
 void test_wrong_way_reference_restarts_at_the_floor() {
   MoveProfile p = {0, 0};
-  move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, DEADBAND, false);
   set_vref(p, 3000);
   // overshot past the deadband: the error has changed sign
   int32_t v = move_profile_step(p, -((int32_t)30 << MOVE_POS_SHIFT), MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
@@ -334,7 +319,7 @@ void test_wrong_way_reference_restarts_at_the_floor() {
 void test_speed_cap_and_floor_bound_the_reference() {
   MoveProfile p = {0, 0};
   int32_t e = (int32_t)1000 << MOVE_POS_SHIFT;
-  move_profile_aim(p, e, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, e, TIME_MS, VEL_MIN, DEADBAND, false);
   int32_t v = 0;
   for (int i = 0; i < 400; i++) {
     v = move_profile_step(p, e, 2000, VEL_MIN, DEADBAND);
@@ -344,11 +329,11 @@ void test_speed_cap_and_floor_bound_the_reference() {
   TEST_ASSERT_EQUAL_INT32(2000, v);
   // a cap under the floor: the floor wins, as in move_vref
   MoveProfile q = {0, 0};
-  move_profile_aim(q, e, TIME_MS, VEL_MIN, false);
+  move_profile_aim(q, e, TIME_MS, VEL_MIN, DEADBAND, false);
   TEST_ASSERT_EQUAL_INT32(VEL_MIN, move_profile_step(q, e, 100, VEL_MIN, DEADBAND));
   // no cap: the reference is still bounded
   MoveProfile r = {0, 0};
-  move_profile_aim(r, e, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, false);
+  move_profile_aim(r, e, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, DEADBAND, false);
   for (int i = 0; i < 2000; i++) v = move_profile_step(r, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_EQUAL_INT32(MOVE_PROFILE_VEL_CAP, v);
 }
@@ -356,24 +341,24 @@ void test_speed_cap_and_floor_bound_the_reference() {
 void test_aim_continuing_keeps_the_reference() {
   MoveProfile p = {0, 0};
   int32_t e = (int32_t)900 << MOVE_POS_SHIFT;
-  move_profile_aim(p, e, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, e, TIME_MS, VEL_MIN, DEADBAND, false);
   int32_t v = 0;
   for (int i = 0; i < 100; i++) v = move_profile_step(p, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_TRUE(v > 3000);
   uint32_t accel_far = accel_of(p);
   // nearer target, same direction: the reference carries on, the
   // deceleration is not relaxed
-  move_profile_aim(p, (int32_t)300 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, true);
+  move_profile_aim(p, (int32_t)300 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, DEADBAND, true);
   TEST_ASSERT_EQUAL_UINT32(accel_far, accel_of(p));
   int32_t v2 = move_profile_step(p, (int32_t)300 << MOVE_POS_SHIFT, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), v, v2);
   // farther target: the larger acceleration is taken, the reference carries on
-  move_profile_aim(p, (int32_t)1000 << MOVE_POS_SHIFT, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, true);
+  move_profile_aim(p, (int32_t)1000 << MOVE_POS_SHIFT, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, DEADBAND, true);
   TEST_ASSERT_TRUE(accel_of(p) > accel_far);
   int32_t v3 = move_profile_step(p, (int32_t)1000 << MOVE_POS_SHIFT, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), v2, v3);
   // a reversal starts over at the floor
-  move_profile_aim(p, -e, TIME_MS, VEL_MIN, false);
+  move_profile_aim(p, -e, TIME_MS, VEL_MIN, DEADBAND, false);
   int32_t v4 = move_profile_step(p, -e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), -VEL_MIN, v4);
   // and move_profile_end forgets the plan
@@ -511,37 +496,6 @@ void test_simulated_late_nearer_retarget_brakes_in_time() {
   TEST_ASSERT_TRUE(a.vref_floor >= VEL_MIN && b.vref_floor >= VEL_MIN && c.vref_floor >= VEL_MIN);
 }
 
-void test_simulated_profile_switch_mid_move_carries_the_speed() {
-  // REG_MOVE_PROFILE written while a move is under way: the planner resumes
-  // from the measured velocity, so a fast move turned smooth is not braked
-  // to the floor and back (no lurch in the drive), and a move time changed
-  // under the smooth profile keeps its reference and only changes its ramps.
-  Switch to_smooth = {60000, true, TIME_MS};
-  Switch slower = {60000, true, 480};
-  Switch quicker = {60000, true, 120};
-  Sim fs = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, true, no_retarget(), to_smooth);
-  Sim ss = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget(), slower);
-  Sim sq = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget(), quicker);
-  Sim smooth = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget());
-  printf("\nprofile switch at 60 ms (10 -> 900):\n");
-  print_sim("fast -> smooth", fs);
-  print_sim("smooth T=240 -> 480", ss);
-  print_sim("smooth T=240 -> 120", sq);
-  print_sim("smooth, no switch", smooth);
-  TEST_ASSERT_TRUE(fs.arrived && ss.arrived && sq.arrived);
-  TEST_ASSERT_TRUE(fs.overshoot <= DEADBAND && ss.overshoot <= DEADBAND && sq.overshoot <= DEADBAND);
-  // fast -> smooth: the drive steps from full to the feedforward of the speed
-  // the carriage has, not to a brake (an unseeded planner restarts at the
-  // floor: a drive step of about 300 duty)
-  TEST_ASSERT_TRUE_MESSAGE(fs.drive_jump <= 60, "fast -> smooth braked hard at the switch");
-  // a move time change keeps the reference: its one jump is at most a step
-  // of the larger of the two accelerations
-  int32_t step = max_step(move_profile_accel(890, 120));
-  TEST_ASSERT_TRUE_MESSAGE(ss.vref_jump <= step, "T=480 switch jumped the reference");
-  TEST_ASSERT_TRUE_MESSAGE(sq.vref_jump <= step, "T=120 switch jumped the reference");
-  TEST_ASSERT_TRUE(ss.arrival_us > smooth.arrival_us && sq.arrival_us < smooth.arrival_us);
-}
-
 void test_accel_guards_the_shortest_time() {
   // T = 1 ms makes T^2 / 4 zero: the clamp, not a division by zero (the wire
   // clamps at MOVE_PROFILE_TIME_MIN_MS; this is for every other caller)
@@ -580,7 +534,6 @@ int main(int, char**) {
   RUN_TEST(test_simulated_move_time_scales_the_move);
   RUN_TEST(test_wire_time_is_clamped_and_mode_checked);
   RUN_TEST(test_simulated_late_nearer_retarget_brakes_in_time);
-  RUN_TEST(test_simulated_profile_switch_mid_move_carries_the_speed);
   RUN_TEST(test_accel_guards_the_shortest_time);
   return UNITY_END();
 }

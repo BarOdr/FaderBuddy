@@ -41,7 +41,9 @@
 // error-based braking absorbs (the ramps and the velocity estimate, which
 // integrate, keep using the measured tick). Ranges every product relies on:
 // velocity within MOVE_PROFILE_VEL_CAP, acceleration within
-// MOVE_PROFILE_ACCEL_MAX, error within +-1023 counts, vel_min within the cap.
+// MOVE_PROFILE_ACCEL_MAX, error within +-1023 counts, vel_min and the speed
+// byte's max_velocity within the cap (main.cpp's apply_move_speed cannot
+// reach a quarter of it; a static_assert there keeps that so).
 
 #pragma once
 
@@ -72,7 +74,9 @@ struct MoveProfile {
 // with a velocity triangle: 4 * distance / time^2 / 16, clamped to
 // MOVE_PROFILE_ACCEL_MAX / 16.
 static inline uint16_t move_profile_accel16(uint16_t distance, uint16_t time_ms) {
-  if (time_ms == 0) return (uint16_t)(MOVE_PROFILE_ACCEL_MAX >> 4);
+  // T under 2 ms makes T^2 / 4 zero: the clamp, not a division by zero (the
+  // wire never sends under MOVE_PROFILE_TIME_MIN_MS; this is for any caller).
+  if (time_ms < 2) return (uint16_t)(MOVE_PROFILE_ACCEL_MAX >> 4);
   // a / 16 = 4e6 * d / T^2 / 16 = 62500 * d / (T^2 / 4): d * 62500 is at most
   // 6.4e7 and T^2 at most 4e6, both one 16 x 16 product.
   uint32_t q = ((uint32_t)time_ms * time_ms) >> 2;
@@ -91,21 +95,61 @@ static inline uint16_t move_profile_floor_q2(uint16_t vel_min) {
   return (uint16_t)(vel_min << 2);
 }
 
+// The error left before the deadband from `err` counts of it, never negative.
+static inline uint16_t move_profile_remaining(uint16_t err, int16_t deadband) {
+  int16_t remaining = (int16_t)err - deadband;
+  return remaining < 0 ? 0 : (uint16_t)remaining;
+}
+
+// Put the plan's reference on its braking curve for the `remaining` counts
+// when it is above it: the speed from which the plan's deceleration reaches
+// the floor at the deadband's edge, v^2 = fl^2 + 2 * a * remaining, in units
+// of 64 counts/s so that the root is 16-bit (the ATtiny's flash is nearly
+// full): (fl/64)^2 + a16 * remaining / 128, the product one 16 x 16 multiply
+// under 2^26. A curve past 16 bits (over 16384 counts/s) is above the cap:
+// nothing to do. The root is Newton's from the reference itself, which is
+// above it: it lands on the curve or within one unit over, from where the
+// step brakes at its rate.
+static inline void move_profile_cap(MoveProfile& p, uint16_t remaining, uint8_t fl64) {
+  uint32_t room = (uint32_t)fl64 * fl64 + (((uint32_t)p.accel16 * remaining) >> 7);
+  if (room >> 16) return;
+  uint16_t room16 = (uint16_t)room;
+  uint8_t mag = (uint8_t)(p.v_q2 >> 8);
+  if ((uint16_t)mag * mag <= room16) return;
+  for (;;) {
+    uint8_t next = (uint8_t)((mag + room16 / mag) >> 1);
+    if (next >= mag) break;
+    mag = next;
+  }
+  p.v_q2 = (uint16_t)mag << 8;  // the step lifts it to the floor if under
+}
+
 // Plan toward a new target `error_q8` (target - position) away. A fresh move,
 // or a reversal, starts the reference at the floor in the error's direction
 // with the acceleration for this distance. A move `continuing` in the same
 // direction keeps its reference (no discontinuity a host could hear) and the
-// larger of its acceleration and the new one, so a nearer target is still
-// braked for in time.
-static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t time_ms, uint16_t vel_min, bool continuing) {
+// larger of its acceleration and the new one, so a nearer target is braked
+// for in time. A nearer target set so late that even that cannot brake from
+// the speed the plan has (the reference is above the braking curve for what
+// is left: the speed from which the deceleration reaches the floor at the
+// `deadband`'s edge) is put on the curve here, the one discontinuity such a
+// retarget costs, so move_profile_step() never has to brake faster than the
+// rate. The curve is worked out in 64 counts/s, the cap within one such unit
+// under it, in 16-bit arithmetic (the ATtiny's flash is nearly full): v/64 is
+// at most 250, the curve's square in those units at most 62500.
+static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t time_ms, uint16_t vel_min, int16_t deadband,
+                                    bool continuing) {
   bool rising = error_q8 > 0;
   int32_t mag_q8 = rising ? error_q8 : -error_q8;
-  uint16_t accel16 = move_profile_accel16((uint16_t)(mag_q8 >> MOVE_POS_SHIFT), time_ms);
+  uint16_t mag = (uint16_t)(mag_q8 >> MOVE_POS_SHIFT);
+  uint16_t accel16 = move_profile_accel16(mag, time_ms);
+  uint16_t floor_q2 = move_profile_floor_q2(vel_min);
   if (continuing && p.v_q2 != 0 && p.rising == rising) {
     if (accel16 > p.accel16) p.accel16 = accel16;
+    move_profile_cap(p, move_profile_remaining(mag, deadband), (uint8_t)(floor_q2 >> 8));
   } else {
     p.accel16 = accel16;
-    p.v_q2 = move_profile_floor_q2(vel_min);
+    p.v_q2 = floor_q2;
     p.rising = rising;
   }
   // a * tick in Q2 = a16 * 16 * 500e-6 * 4 = a16 * 0.032 = a16 * 4194 / 2^17
@@ -117,7 +161,7 @@ static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t t
 // move_drive(), signed toward the target: rising at the acceleration until
 // braking is due, falling at it from then on, never under `vel_min` in
 // magnitude, never over `max_velocity` when that is not 0
-// (MOVE_VEL_UNLIMITED). Braking is due when the reference could not come
+// (MOVE_VEL_UNLIMITED; within MOVE_PROFILE_VEL_CAP). Braking is due when the reference could not come
 // down to the floor within the error left outside the `deadband` at this
 // deceleration. A reference planned in the other direction (a reversal
 // without a new aim, an overshoot past the deadband) restarts at the floor.
@@ -129,10 +173,8 @@ static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint16
   // A reference the wrong way, or none: start over at the floor, as
   // move_vref would hand out for this error.
   if (v == 0 || p.rising != rising) v = floor_q2;
-  // The error left before the deadband, whole counts.
   int32_t err_q8 = rising ? error_q8 : -error_q8;
-  int16_t remaining = (int16_t)(err_q8 >> MOVE_POS_SHIFT) - deadband;
-  if (remaining < 0) remaining = 0;
+  uint16_t remaining = move_profile_remaining((uint16_t)(err_q8 >> MOVE_POS_SHIFT), deadband);
   // Brake when the reference could not reach the floor within what is left:
   // v^2 - vmin^2 >= 2 * a * remaining (so the floor at the edge holds). v and
   // vmin are within the cap, so their squares are under 2^28; a in
@@ -140,32 +182,19 @@ static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint16
   uint16_t mag = v >> 2;
   uint16_t fl = floor_q2 >> 2;
   uint32_t stop = (uint32_t)mag * mag;
-  uint32_t room = (uint32_t)fl * fl + (((uint32_t)p.accel16 * (uint16_t)remaining) << 5);
+  uint32_t room = (uint32_t)fl * fl + (((uint32_t)p.accel16 * remaining) << 5);
   if (stop >= room) {
     v = (v > (uint16_t)(floor_q2 + p.step_q2)) ? (uint16_t)(v - p.step_q2) : floor_q2;
   } else {
     v = (uint16_t)(v + p.step_q2);  // at most the cap plus one step: fits
   }
-  uint16_t cap = (max_velocity != 0 && max_velocity < MOVE_PROFILE_VEL_CAP) ? max_velocity : (uint16_t)MOVE_PROFILE_VEL_CAP;
-  uint16_t cap_q2 = (uint16_t)(cap << 2);
+  uint16_t cap_q2 = (max_velocity != 0) ? (uint16_t)(max_velocity << 2) : (uint16_t)(MOVE_PROFILE_VEL_CAP << 2);
   if (v > cap_q2) v = cap_q2;
   if (v < floor_q2) v = floor_q2;
   p.v_q2 = v;
   p.rising = rising;
   int32_t out = v >> 2;
   return rising ? out : -out;
-}
-
-// Re-plan a move under way when REG_MOVE_PROFILE changes while it runs (the
-// fast profile or another move time until now): a fresh plan for what is
-// left at `time_ms`, seeded with the speed the carriage has toward the target
-// (`velocity`, counts/s, + toward the motor end) rather than the floor, so
-// the reference carries on from where the move is instead of braking to the
-// floor and ramping again.
-static inline void move_profile_resume(MoveProfile& p, int32_t error_q8, int32_t velocity, uint16_t time_ms,
-                                       uint16_t vel_min) {
-  move_profile_aim(p, error_q8, time_ms, vel_min, false);
-  (void)velocity;
 }
 
 // Forget the plan when a move ends, so the next one starts at the floor.
