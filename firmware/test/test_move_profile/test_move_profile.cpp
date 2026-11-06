@@ -125,7 +125,7 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
     if (error_q8 > deadband_q8 || error_q8 < -deadband_q8) {
       in_deadband = false;
       int32_t v_ref = legacy ? move_vref(error_q8, 50, max_velocity, law.vel_min)
-                             : move_profile_step(p, error_q8, TICK_US, max_velocity, law.vel_min, law.deadband);
+                             : move_profile_step(p, error_q8, max_velocity, law.vel_min, law.deadband);
       int32_t v_abs = v_ref < 0 ? -v_ref : v_ref;
       if (v_abs < s.vref_floor) s.vref_floor = v_abs;
       if (v_abs > s.peak_vref) s.peak_vref = v_abs;
@@ -206,6 +206,14 @@ static int32_t max_step(uint32_t accel) {
   return (int32_t)((uint64_t)accel * TICK_US / 1000000UL) + 2;
 }
 
+// The plan's state in the units the tests reason in: a signed reference in
+// counts/s and an acceleration in counts/s^2.
+static void set_vref(MoveProfile& p, int32_t v) {
+  p.rising = v > 0;
+  p.v_q2 = (uint16_t)((v > 0 ? v : -v) << 2);
+}
+static uint32_t accel_of(const MoveProfile& p) { return (uint32_t)p.accel16 << 4; }
+
 // --------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------
@@ -234,7 +242,7 @@ void test_soft_start_ramps_from_the_floor() {
   int32_t v = 0;
   // 20 ms of ticks with the error held (the plant has not moved yet)
   for (int i = 0; i < 40; i++) {
-    v = move_profile_step(p, error_q8, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+    v = move_profile_step(p, error_q8, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
     TEST_ASSERT_TRUE_MESSAGE(v >= last, "reference must not fall while accelerating");
     TEST_ASSERT_TRUE_MESSAGE(v - last <= max_step(accel), "reference stepped by more than accel*dt");
     last = v;
@@ -252,8 +260,8 @@ void test_falling_move_mirrors_a_rising_one() {
   move_profile_aim(up, e, TIME_MS, VEL_MIN, false);
   move_profile_aim(down, -e, TIME_MS, VEL_MIN, false);
   for (int i = 0; i < 100; i++) {
-    int32_t vu = move_profile_step(up, e, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
-    int32_t vd = move_profile_step(down, -e, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+    int32_t vu = move_profile_step(up, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+    int32_t vd = move_profile_step(down, -e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
     TEST_ASSERT_EQUAL_INT32(vu, -vd);
     TEST_ASSERT_TRUE(vd < 0);
   }
@@ -264,12 +272,12 @@ void test_brakes_to_the_floor_at_the_deadband() {
   // speed comes down at its deceleration and sits on the floor, never below.
   MoveProfile p = {0, 0};
   move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, false);
-  p.v_q8 = (int32_t)4000 << MOVE_POS_SHIFT;
-  uint32_t accel = p.accel;
+  set_vref(p, 4000);
+  uint32_t accel = accel_of(p);
   int32_t error_q8 = (int32_t)DEADBAND << MOVE_POS_SHIFT;
   int32_t last = 4000;
   for (int i = 0; i < 200; i++) {
-    int32_t v = move_profile_step(p, error_q8, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+    int32_t v = move_profile_step(p, error_q8, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
     TEST_ASSERT_TRUE_MESSAGE(v <= last, "reference must fall while braking");
     TEST_ASSERT_TRUE_MESSAGE(last - v <= max_step(accel), "reference dropped by more than accel*dt");
     TEST_ASSERT_TRUE_MESSAGE(v >= VEL_MIN, "reference went under the floor");
@@ -278,10 +286,10 @@ void test_brakes_to_the_floor_at_the_deadband() {
   TEST_ASSERT_EQUAL_INT32(VEL_MIN, last);
   // With error left it holds on the braking curve, the speed from which the
   // floor is reached at the deceleration over what is left: within a step.
-  p.v_q8 = (int32_t)4000 << MOVE_POS_SHIFT;
+  set_vref(p, 4000);
   int32_t v = 0;
   for (int i = 0; i < 200; i++) {
-    v = move_profile_step(p, (int32_t)(DEADBAND + 2) << MOVE_POS_SHIFT, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+    v = move_profile_step(p, (int32_t)(DEADBAND + 2) << MOVE_POS_SHIFT, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   }
   int32_t curve = (int32_t)sqrt((double)VEL_MIN * VEL_MIN + 2.0 * accel * 2);
   TEST_ASSERT_INT32_WITHIN(max_step(accel), curve, v);
@@ -290,10 +298,10 @@ void test_brakes_to_the_floor_at_the_deadband() {
 void test_wrong_way_reference_restarts_at_the_floor() {
   MoveProfile p = {0, 0};
   move_profile_aim(p, (int32_t)800 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, false);
-  p.v_q8 = (int32_t)3000 << MOVE_POS_SHIFT;
+  set_vref(p, 3000);
   // overshot past the deadband: the error has changed sign
-  int32_t v = move_profile_step(p, -((int32_t)30 << MOVE_POS_SHIFT), TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
-  TEST_ASSERT_INT32_WITHIN(max_step(p.accel), -VEL_MIN, v);
+  int32_t v = move_profile_step(p, -((int32_t)30 << MOVE_POS_SHIFT), MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), -VEL_MIN, v);
   TEST_ASSERT_TRUE(v < 0);
 }
 
@@ -303,7 +311,7 @@ void test_speed_cap_and_floor_bound_the_reference() {
   move_profile_aim(p, e, TIME_MS, VEL_MIN, false);
   int32_t v = 0;
   for (int i = 0; i < 400; i++) {
-    v = move_profile_step(p, e, TICK_US, 2000, VEL_MIN, DEADBAND);
+    v = move_profile_step(p, e, 2000, VEL_MIN, DEADBAND);
     TEST_ASSERT_TRUE(v <= 2000);
     TEST_ASSERT_TRUE(v >= VEL_MIN);
   }
@@ -311,11 +319,11 @@ void test_speed_cap_and_floor_bound_the_reference() {
   // a cap under the floor: the floor wins, as in move_vref
   MoveProfile q = {0, 0};
   move_profile_aim(q, e, TIME_MS, VEL_MIN, false);
-  TEST_ASSERT_EQUAL_INT32(VEL_MIN, move_profile_step(q, e, TICK_US, 100, VEL_MIN, DEADBAND));
+  TEST_ASSERT_EQUAL_INT32(VEL_MIN, move_profile_step(q, e, 100, VEL_MIN, DEADBAND));
   // no cap: the reference is still bounded
   MoveProfile r = {0, 0};
   move_profile_aim(r, e, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, false);
-  for (int i = 0; i < 2000; i++) v = move_profile_step(r, e, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  for (int i = 0; i < 2000; i++) v = move_profile_step(r, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_EQUAL_INT32(MOVE_PROFILE_VEL_CAP, v);
 }
 
@@ -324,27 +332,27 @@ void test_aim_continuing_keeps_the_reference() {
   int32_t e = (int32_t)900 << MOVE_POS_SHIFT;
   move_profile_aim(p, e, TIME_MS, VEL_MIN, false);
   int32_t v = 0;
-  for (int i = 0; i < 100; i++) v = move_profile_step(p, e, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  for (int i = 0; i < 100; i++) v = move_profile_step(p, e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
   TEST_ASSERT_TRUE(v > 3000);
-  uint32_t accel_far = p.accel;
+  uint32_t accel_far = accel_of(p);
   // nearer target, same direction: the reference carries on, the
   // deceleration is not relaxed
   move_profile_aim(p, (int32_t)300 << MOVE_POS_SHIFT, TIME_MS, VEL_MIN, true);
-  TEST_ASSERT_EQUAL_UINT32(accel_far, p.accel);
-  int32_t v2 = move_profile_step(p, (int32_t)300 << MOVE_POS_SHIFT, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
-  TEST_ASSERT_INT32_WITHIN(max_step(p.accel), v, v2);
+  TEST_ASSERT_EQUAL_UINT32(accel_far, accel_of(p));
+  int32_t v2 = move_profile_step(p, (int32_t)300 << MOVE_POS_SHIFT, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), v, v2);
   // farther target: the larger acceleration is taken, the reference carries on
   move_profile_aim(p, (int32_t)1000 << MOVE_POS_SHIFT, MOVE_PROFILE_TIME_MIN_MS, VEL_MIN, true);
-  TEST_ASSERT_TRUE(p.accel > accel_far);
-  int32_t v3 = move_profile_step(p, (int32_t)1000 << MOVE_POS_SHIFT, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
-  TEST_ASSERT_INT32_WITHIN(max_step(p.accel), v2, v3);
+  TEST_ASSERT_TRUE(accel_of(p) > accel_far);
+  int32_t v3 = move_profile_step(p, (int32_t)1000 << MOVE_POS_SHIFT, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), v2, v3);
   // a reversal starts over at the floor
   move_profile_aim(p, -e, TIME_MS, VEL_MIN, false);
-  int32_t v4 = move_profile_step(p, -e, TICK_US, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
-  TEST_ASSERT_INT32_WITHIN(max_step(p.accel), -VEL_MIN, v4);
+  int32_t v4 = move_profile_step(p, -e, MOVE_VEL_UNLIMITED, VEL_MIN, DEADBAND);
+  TEST_ASSERT_INT32_WITHIN(max_step(accel_of(p)), -VEL_MIN, v4);
   // and move_profile_end forgets the plan
   move_profile_end(p);
-  TEST_ASSERT_EQUAL_INT32(0, p.v_q8);
+  TEST_ASSERT_EQUAL_UINT16(0, p.v_q2);
 }
 
 void test_simulated_full_move_is_soft_and_on_time() {

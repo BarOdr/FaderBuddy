@@ -32,11 +32,16 @@
 // that lags the reference or a hand that slows the carriage all end at the
 // same place: the floor at the deadband's edge, and the brake inside it.
 //
-// Scales: velocity in counts/s, kept in Q8 so that a small acceleration still
-// advances it each 500 us tick; acceleration in counts/s^2, whole; error in
-// Q8 counts as everywhere else. Ranges every product relies on: velocity
-// within +-MOVE_PROFILE_VEL_CAP, acceleration within MOVE_PROFILE_ACCEL_MAX,
-// error within +-1023 counts, vel_min within MOVE_PROFILE_VEL_CAP.
+// Written for the ATtiny: the reference is a 16-bit magnitude in quarter
+// counts/s with its direction beside it, the acceleration is 16 bits in
+// sixteenths, every product is one 16 x 16 -> 32 multiply, and 32-bit values
+// are only added and compared. The step per tick is worked out once per aim
+// for the nominal control tick (MOVE_PROFILE_TICK_US): a late tick advances
+// the reference a little less than the time that passed, which the
+// error-based braking absorbs (the ramps and the velocity estimate, which
+// integrate, keep using the measured tick). Ranges every product relies on:
+// velocity within MOVE_PROFILE_VEL_CAP, acceleration within
+// MOVE_PROFILE_ACCEL_MAX, error within +-1023 counts, vel_min within the cap.
 
 #pragma once
 
@@ -44,28 +49,46 @@
 
 #include "move_law.h"
 
-// The acceleration is clamped here: 2 * ACCEL_MAX * 1023 counts stays under
-// 2^31 in the braking comparison. It is reached at the shortest move time
-// over the longest travel, where the plant could not follow anyway.
+// The control tick the acceleration is integrated over.
+#define MOVE_PROFILE_TICK_US (500)
+// The acceleration is clamped here: in sixteenths it fits 16 bits, and
+// 2 * ACCEL_MAX * 1023 counts stays under 2^32 in the braking comparison. It
+// is reached at the shortest move times over long travels, where the plant
+// could not follow anyway: full travel at this acceleration is 88 ms.
 #define MOVE_PROFILE_ACCEL_MAX (524288UL)  // counts/s^2
-// The reference is clamped here: its square stays under 2^31. Twice what the
-// plant can do; the speed byte, not this, is how a host limits a move.
-#define MOVE_PROFILE_VEL_CAP (16000L)  // counts/s
+// The reference is clamped here: in quarters it fits 16 bits, and its square
+// stays under 2^28. Twice what the plant can do; the speed byte, not this, is
+// how a host limits a move.
+#define MOVE_PROFILE_VEL_CAP (16000)  // counts/s
 
 struct MoveProfile {
-  int32_t v_q8;    // planned velocity reference, counts/s in Q8, signed; 0 = none planned
-  uint32_t accel;  // this move's acceleration and deceleration, counts/s^2
+  uint16_t v_q2;     // |planned velocity reference|, counts/s in Q2; 0 = none planned
+  bool rising;       // its direction: toward the motor end
+  uint16_t accel16;  // this move's acceleration and deceleration, counts/s^2 / 16
+  uint16_t step_q2;  // the acceleration over one control tick, Q2 counts/s
 };
 
-// The acceleration that moves `distance` counts in `time_ms` with a velocity
-// triangle: 4 * distance / time^2, clamped to MOVE_PROFILE_ACCEL_MAX.
+// The acceleration, in sixteenths, that moves `distance` counts in `time_ms`
+// with a velocity triangle: 4 * distance / time^2 / 16, clamped to
+// MOVE_PROFILE_ACCEL_MAX / 16.
+static inline uint16_t move_profile_accel16(uint16_t distance, uint16_t time_ms) {
+  if (time_ms == 0) return (uint16_t)(MOVE_PROFILE_ACCEL_MAX >> 4);
+  // a / 16 = 4e6 * d / T^2 / 16 = 62500 * d / (T^2 / 4): d * 62500 is at most
+  // 6.4e7 and T^2 at most 4e6, both one 16 x 16 product.
+  uint32_t q = ((uint32_t)time_ms * time_ms) >> 2;
+  uint32_t a16 = ((uint32_t)distance * 62500U) / q;
+  return (a16 > (MOVE_PROFILE_ACCEL_MAX >> 4)) ? (uint16_t)(MOVE_PROFILE_ACCEL_MAX >> 4) : (uint16_t)a16;
+}
+
+// The same in whole counts/s^2.
 static inline uint32_t move_profile_accel(uint16_t distance, uint16_t time_ms) {
-  if (time_ms == 0) return MOVE_PROFILE_ACCEL_MAX;
-  // 4 * d * 1e6 / T^2 counts/s^2: d * 2e6 is at most 2.05e9, in two halves
-  // so it never leaves 32 bits; T^2 is at most 4e6.
-  uint32_t t2 = (uint32_t)time_ms * time_ms;
-  uint32_t a = ((2000000UL * distance) / t2) * 2UL;
-  return (a > MOVE_PROFILE_ACCEL_MAX) ? MOVE_PROFILE_ACCEL_MAX : a;
+  return (uint32_t)move_profile_accel16(distance, time_ms) << 4;
+}
+
+// The floor of the reference, Q2, within the cap.
+static inline uint16_t move_profile_floor_q2(uint16_t vel_min) {
+  if (vel_min > MOVE_PROFILE_VEL_CAP) vel_min = MOVE_PROFILE_VEL_CAP;
+  return (uint16_t)(vel_min << 2);
 }
 
 // Plan toward a new target `error_q8` (target - position) away. A fresh move,
@@ -77,60 +100,63 @@ static inline uint32_t move_profile_accel(uint16_t distance, uint16_t time_ms) {
 static inline void move_profile_aim(MoveProfile& p, int32_t error_q8, uint16_t time_ms, uint16_t vel_min, bool continuing) {
   bool rising = error_q8 > 0;
   int32_t mag_q8 = rising ? error_q8 : -error_q8;
-  uint32_t accel = move_profile_accel((uint16_t)(mag_q8 >> MOVE_POS_SHIFT), time_ms);
-  if (continuing && p.v_q8 != 0) {
-    if (accel > p.accel) p.accel = accel;
+  uint16_t accel16 = move_profile_accel16((uint16_t)(mag_q8 >> MOVE_POS_SHIFT), time_ms);
+  if (continuing && p.v_q2 != 0 && p.rising == rising) {
+    if (accel16 > p.accel16) p.accel16 = accel16;
   } else {
-    p.accel = accel;
-    p.v_q8 = (int32_t)vel_min << MOVE_POS_SHIFT;
-    if (!rising) p.v_q8 = -p.v_q8;
+    p.accel16 = accel16;
+    p.v_q2 = move_profile_floor_q2(vel_min);
+    p.rising = rising;
   }
+  // a * tick in Q2 = a16 * 16 * 500e-6 * 4 = a16 * 0.032 = a16 * 4194 / 2^17
+  // (to 0.01%), rounded; a16 * 4194 is under 2^28.
+  p.step_q2 = (uint16_t)(((uint32_t)p.accel16 * 4194U + 65536UL) >> 17);
 }
 
-// Advance the plan by one control tick of `dt_us` and return the velocity
-// reference for move_drive(), signed toward the target: rising at the
-// acceleration until braking is due, falling at it from then on, never under
-// `vel_min` in magnitude, never over `max_velocity` when that is not 0
+// Advance the plan by one control tick and return the velocity reference for
+// move_drive(), signed toward the target: rising at the acceleration until
+// braking is due, falling at it from then on, never under `vel_min` in
+// magnitude, never over `max_velocity` when that is not 0
 // (MOVE_VEL_UNLIMITED). Braking is due when the reference could not come
 // down to the floor within the error left outside the `deadband` at this
 // deceleration. A reference planned in the other direction (a reversal
 // without a new aim, an overshoot past the deadband) restarts at the floor.
-static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint32_t dt_us,
-                                        uint16_t max_velocity, uint16_t vel_min, int16_t deadband) {
-  if (dt_us > MOVE_DT_MAX_US) dt_us = MOVE_DT_MAX_US;
+static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint16_t max_velocity, uint16_t vel_min,
+                                        int16_t deadband) {
   bool rising = error_q8 > 0;
-  int32_t floor_q8 = (int32_t)vel_min << MOVE_POS_SHIFT;
+  uint16_t floor_q2 = move_profile_floor_q2(vel_min);
+  uint16_t v = p.v_q2;
   // A reference the wrong way, or none: start over at the floor, as
   // move_vref would hand out for this error.
-  if (p.v_q8 == 0 || (p.v_q8 > 0) != rising) p.v_q8 = rising ? floor_q8 : -floor_q8;
-  int32_t mag_q8 = rising ? p.v_q8 : -p.v_q8;
-  int32_t mag = mag_q8 >> MOVE_POS_SHIFT;
+  if (v == 0 || p.rising != rising) v = floor_q2;
   // The error left before the deadband, whole counts.
-  int32_t remaining = ((rising ? error_q8 : -error_q8) >> MOVE_POS_SHIFT) - deadband;
+  int32_t err_q8 = rising ? error_q8 : -error_q8;
+  int16_t remaining = (int16_t)(err_q8 >> MOVE_POS_SHIFT) - deadband;
   if (remaining < 0) remaining = 0;
   // Brake when the reference could not reach the floor within what is left:
-  // v^2 - vmin^2 >= 2 * a * remaining (so the floor at the edge holds). v and vmin are within the cap, so their
-  // squares are under 2^28; 2 * a * remaining is under 2^31 (ACCEL_MAX).
-  uint32_t vmin = (vel_min > MOVE_PROFILE_VEL_CAP) ? (uint32_t)MOVE_PROFILE_VEL_CAP : vel_min;
-  uint32_t stop = (uint32_t)mag * (uint32_t)mag;
-  uint32_t room = vmin * vmin + 2UL * p.accel * (uint32_t)remaining;
-  // The acceleration over this tick, Q8: a * dt / 1e6 * 256 = a * dt / 3906.25;
-  // (a >> 4) * dt is under 2^29 and 244 is 3906.25 / 16 to 0.06%.
-  int32_t step_q8 = (int32_t)(((p.accel >> 4) * dt_us) / 244UL);
+  // v^2 - vmin^2 >= 2 * a * remaining (so the floor at the edge holds). v and
+  // vmin are within the cap, so their squares are under 2^28; a in
+  // sixteenths times the error left, times 32, is under 2^31.
+  uint16_t mag = v >> 2;
+  uint16_t fl = floor_q2 >> 2;
+  uint32_t stop = (uint32_t)mag * mag;
+  uint32_t room = (uint32_t)fl * fl + (((uint32_t)p.accel16 * (uint16_t)remaining) << 5);
   if (stop >= room) {
-    mag_q8 -= step_q8;
+    v = (v > (uint16_t)(floor_q2 + p.step_q2)) ? (uint16_t)(v - p.step_q2) : floor_q2;
   } else {
-    mag_q8 += step_q8;
+    v = (uint16_t)(v + p.step_q2);  // at most the cap plus one step: fits
   }
-  int32_t cap_q8 = (int32_t)MOVE_PROFILE_VEL_CAP << MOVE_POS_SHIFT;
-  if (max_velocity != 0 && ((int32_t)max_velocity << MOVE_POS_SHIFT) < cap_q8) cap_q8 = (int32_t)max_velocity << MOVE_POS_SHIFT;
-  if (mag_q8 > cap_q8) mag_q8 = cap_q8;
-  if (mag_q8 < floor_q8) mag_q8 = floor_q8;
-  p.v_q8 = rising ? mag_q8 : -mag_q8;
-  return rising ? (mag_q8 >> MOVE_POS_SHIFT) : -(mag_q8 >> MOVE_POS_SHIFT);
+  uint16_t cap = (max_velocity != 0 && max_velocity < MOVE_PROFILE_VEL_CAP) ? max_velocity : (uint16_t)MOVE_PROFILE_VEL_CAP;
+  uint16_t cap_q2 = (uint16_t)(cap << 2);
+  if (v > cap_q2) v = cap_q2;
+  if (v < floor_q2) v = floor_q2;
+  p.v_q2 = v;
+  p.rising = rising;
+  int32_t out = v >> 2;
+  return rising ? out : -out;
 }
 
 // Forget the plan when a move ends, so the next one starts at the floor.
 static inline void move_profile_end(MoveProfile& p) {
-  p.v_q8 = 0;
+  p.v_q2 = 0;
 }
