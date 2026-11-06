@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (8)
+#define FW_VERSION_MINOR (9)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -88,6 +88,11 @@
 // REG_LAYER_NOTCHES. Older firmware stores the config but coasts on the
 // unknown mode, so a fader there stays free; no protocol-version bump.
 #define FW_VERSION_PLACED_NOTCHES (0x0108)  // 1.8
+
+// Minimum firmware version that moves on the smooth profile by default and
+// implements REG_MOVE_PROFILE. Older firmware moves as MOVE_PROFILE_FAST and
+// ignores the register; no protocol-version bump.
+#define FW_VERSION_MOVE_PROFILE (0x0109)  // 1.9
 
 
 /*
@@ -138,7 +143,9 @@
  * -----|---------------------|---------|------|------------
  * 0x14 | LAYER_NOTCHES       | R/W     |u8[4] | Placed notch positions (layer-addressed, see below; FW 1.8+)
  * -----|---------------------|---------|------|------------
- * 0x15 | ...                 |         |      | (free - next production register goes here)
+ * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + move time in ms (see below; FW 1.9+)
+ * -----|---------------------|---------|------|------------
+ * 0x16 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -192,6 +199,53 @@
 #define REG_MOTOR_CAL 0x12  // Measured motor characteristics (R, 12 bytes, see below)
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
 #define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
+#define REG_MOVE_PROFILE 0x15  // Move profile: mode + move time (R/W, u8 + u16 big-endian, see below)
+
+/*
+ * REG_MOVE_PROFILE (0x15) - read/write, 3 bytes, FW 1.9+.
+ *
+ * How a remote move (a REG_LAYER_TARGET write, a layer change) gets from
+ * here to there. A write is [reg, mode, time_hi, time_lo] and is taken whole
+ * or not at all; a read is [reg], then [mode, time_hi, time_lo]. It applies
+ * to the next move that starts; a move under way keeps its profile.
+ *
+ * mode  MOVE_PROFILE_SMOOTH (default): the fader eases out of rest, peaks
+ *       mid-travel and eases into the target, like a motorised fader on a
+ *       studio desk. A move takes about `time` ms whatever its distance,
+ *       down to the shortest move the mechanism can make smoothly (a few
+ *       millimetres; shorter moves are quicker) and up to what the motor
+ *       can do (a full-travel move may take a little longer).
+ *       MOVE_PROFILE_FAST: the move of firmware up to 1.8, full drive from
+ *       the first tick and an exponential approach to the target; the
+ *       quickest the mechanism moves. `time` is ignored. A write with any
+ *       other mode value is ignored.
+ * time  the smooth move's time, ms, MOVE_PROFILE_TIME_MIN_MS to
+ *       MOVE_PROFILE_TIME_MAX_MS; a write outside is clamped. 240 by default.
+ *
+ * In both modes the REG_LAYER_TARGET speed byte still caps the speed of the
+ * move. Not stored: every reset starts at MOVE_PROFILE_SMOOTH and
+ * MOVE_PROFILE_TIME_DEFAULT_MS, so a host that wants another setting writes
+ * it again after the fader resets. Firmware without this register moves as
+ * MOVE_PROFILE_FAST and reads back 0xFF bytes (see FW_VERSION_NONE).
+ */
+#define MOVE_PROFILE_FAST (0)
+#define MOVE_PROFILE_SMOOTH (1)
+#define MOVE_PROFILE_TIME_DEFAULT_MS (240)
+#define MOVE_PROFILE_TIME_MIN_MS (50)
+#define MOVE_PROFILE_TIME_MAX_MS (2000)
+
+// Whether a REG_MOVE_PROFILE mode byte names a profile.
+static inline bool move_profile_mode_valid(uint8_t mode) {
+  return mode == MOVE_PROFILE_FAST || mode == MOVE_PROFILE_SMOOTH;
+}
+
+// The move time a REG_MOVE_PROFILE write of these two bytes selects.
+static inline uint16_t move_profile_time_from_wire(uint8_t high, uint8_t low) {
+  uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
+  if (ms < MOVE_PROFILE_TIME_MIN_MS) return MOVE_PROFILE_TIME_MIN_MS;
+  if (ms > MOVE_PROFILE_TIME_MAX_MS) return MOVE_PROFILE_TIME_MAX_MS;
+  return ms;
+}
 
 /*
  * REG_LAYER_NOTCHES (0x14) - read/write, layer-addressed, FW 1.8+.
