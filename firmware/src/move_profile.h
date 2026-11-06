@@ -156,6 +156,18 @@ static inline int32_t move_profile_step(MoveProfile& p, int32_t error_q8, uint16
   return rising ? out : -out;
 }
 
+// Re-plan a move under way when REG_MOVE_PROFILE changes while it runs (the
+// fast profile or another move time until now): a fresh plan for what is
+// left at `time_ms`, seeded with the speed the carriage has toward the target
+// (`velocity`, counts/s, + toward the motor end) rather than the floor, so
+// the reference carries on from where the move is instead of braking to the
+// floor and ramping again.
+static inline void move_profile_resume(MoveProfile& p, int32_t error_q8, int32_t velocity, uint16_t time_ms,
+                                       uint16_t vel_min) {
+  move_profile_aim(p, error_q8, time_ms, vel_min, false);
+  (void)velocity;
+}
+
 // Forget the plan when a move ends, so the next one starts at the floor.
 static inline void move_profile_end(MoveProfile& p) {
   p.v_q2 = 0;

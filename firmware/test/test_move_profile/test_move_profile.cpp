@@ -68,6 +68,7 @@ struct Sim {
   int32_t vref_floor;    // smallest |v_ref| seen while outside the deadband
   int32_t vref_jump;     // largest |v_ref change| between ticks
   int32_t first_drive;   // |drive| on the first tick
+  int32_t drive_jump;    // largest |drive change| between driven ticks
   int32_t peak_vref;
   uint32_t ticks;
 };
@@ -77,8 +78,15 @@ struct Retarget {
   int16_t target;
 };
 
+// A REG_MOVE_PROFILE write mid-move: the profile (and move time) from then on.
+struct Switch {
+  uint32_t at_us;   // 0 = none
+  bool smooth;
+  uint16_t time_ms;
+};
+
 static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t max_velocity, bool legacy,
-                    Retarget retarget) {
+                    Retarget retarget, Switch sw = {0, false, 0}) {
   Sim s = {};
   double pos = start;        // counts
   double vel = 0;            // counts/s
@@ -88,6 +96,9 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
   int32_t ceiling_q8 = (int32_t)TAKEUP_DUTY << MOVE_POS_SHIFT;
   int32_t last_vref = 0;
   bool have_last_vref = false;
+  int16_t last_drive = 0;
+  bool have_last_drive = false;
+  bool switched = (sw.at_us == 0);
   MoveProfile p = {0, 0};
   int16_t cur_target = target;
   int32_t error0 = (int32_t)target - start;
@@ -108,6 +119,13 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
       int32_t new_dir = (new_err > 0) ? 1 : -1;
       move_profile_aim(p, new_err, time_ms, law.vel_min, new_dir == old_dir);
       if (new_dir != old_dir) ceiling_q8 = (int32_t)TAKEUP_DUTY << MOVE_POS_SHIFT;
+    }
+    if (!switched && t >= sw.at_us) {
+      // process_i2c_requests(): between ticks, from the last tick's sensing
+      switched = true;
+      legacy = !sw.smooth;
+      time_ms = sw.time_ms;
+      move_profile_resume(p, ((int32_t)cur_target << MOVE_POS_SHIFT) - pos_q8, velocity_est, time_ms, law.vel_min);
     }
     // sensing: ADC conversions since the last tick
     for (int i = 0; i < ADC_PER_TICK; i++) {
@@ -142,7 +160,15 @@ static Sim simulate(int16_t start, int16_t target, uint16_t time_ms, uint16_t ma
       int16_t limit = move_q8_to_int(ceiling_q8);
       drive = (u > limit) ? limit : (u < -limit) ? -limit : (int16_t)u;
       if (s.ticks == 0) s.first_drive = drive < 0 ? -drive : drive;
+      if (have_last_drive) {
+        int32_t jump = (int32_t)drive - last_drive;
+        if (jump < 0) jump = -jump;
+        if (jump > s.drive_jump) s.drive_jump = jump;
+      }
+      last_drive = drive;
+      have_last_drive = true;
     } else {
+      have_last_drive = false;
       if (!in_deadband) {
         in_deadband = true;
         steady_since_us = t;
@@ -195,9 +221,9 @@ static Retarget no_retarget() {
 static void print_sim(const char* name, const Sim& s) {
   // a move that ends inside the deadband short of 90% has no 10-90 time
   unsigned long t1090 = (s.t90_us > s.t10_us) ? (s.t90_us - s.t10_us) / 1000 : 0;
-  printf("  %-26s arrived=%d t=%lu ms 10-90=%lu ms overshoot=%ld peak=%ld floor=%ld jump=%ld first_drive=%ld\n", name,
-         (int)s.arrived, (unsigned long)(s.arrival_us / 1000), t1090,
-         (long)s.overshoot, (long)s.peak_vref, (long)s.vref_floor, (long)s.vref_jump, (long)s.first_drive);
+  printf("  %-26s arrived=%d t=%lu ms 10-90=%lu ms overshoot=%ld peak=%ld floor=%ld jump=%ld first_drive=%ld drive_jump=%ld\n",
+         name, (int)s.arrived, (unsigned long)(s.arrival_us / 1000), t1090, (long)s.overshoot, (long)s.peak_vref,
+         (long)s.vref_floor, (long)s.vref_jump, (long)s.first_drive, (long)s.drive_jump);
 }
 
 // The largest change the planner may make to the reference in one tick: its
@@ -462,6 +488,68 @@ void test_simulated_move_time_scales_the_move() {
   TEST_ASSERT_TRUE(fast.overshoot <= DEADBAND && slow.overshoot <= DEADBAND);
 }
 
+void test_simulated_late_nearer_retarget_brakes_in_time() {
+  // A nearer target in the same direction, set late, when the reference is
+  // already past where it could brake to the new target at this move's
+  // deceleration: the planner must come down to its braking curve at once
+  // (the fader cannot stop softly from where it is; the brake is the host's
+  // doing), not keep braking at the move's own rate and run past the target.
+  Retarget r100 = {100000, 400};
+  Retarget r120 = {120000, 500};
+  Retarget r140 = {140000, 600};
+  Sim a = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, r100);
+  Sim b = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, r120);
+  Sim c = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, r140);
+  printf("\nlate nearer retarget (10 -> 900):\n");
+  print_sim("-> 400 at 100 ms", a);
+  print_sim("-> 500 at 120 ms", b);
+  print_sim("-> 600 at 140 ms", c);
+  TEST_ASSERT_TRUE(a.arrived && b.arrived && c.arrived);
+  TEST_ASSERT_TRUE_MESSAGE(a.overshoot <= DEADBAND, "late retarget to 400 overshot");
+  TEST_ASSERT_TRUE_MESSAGE(b.overshoot <= DEADBAND, "late retarget to 500 overshot");
+  TEST_ASSERT_TRUE_MESSAGE(c.overshoot <= DEADBAND, "late retarget to 600 overshot");
+  TEST_ASSERT_TRUE(a.vref_floor >= VEL_MIN && b.vref_floor >= VEL_MIN && c.vref_floor >= VEL_MIN);
+}
+
+void test_simulated_profile_switch_mid_move_carries_the_speed() {
+  // REG_MOVE_PROFILE written while a move is under way: the planner resumes
+  // from the measured velocity, so a fast move turned smooth is not braked
+  // to the floor and back (no lurch in the drive), and a move time changed
+  // under the smooth profile keeps its reference and only changes its ramps.
+  Switch to_smooth = {60000, true, TIME_MS};
+  Switch slower = {60000, true, 480};
+  Switch quicker = {60000, true, 120};
+  Sim fs = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, true, no_retarget(), to_smooth);
+  Sim ss = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget(), slower);
+  Sim sq = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget(), quicker);
+  Sim smooth = simulate(10, 900, TIME_MS, MOVE_VEL_UNLIMITED, false, no_retarget());
+  printf("\nprofile switch at 60 ms (10 -> 900):\n");
+  print_sim("fast -> smooth", fs);
+  print_sim("smooth T=240 -> 480", ss);
+  print_sim("smooth T=240 -> 120", sq);
+  print_sim("smooth, no switch", smooth);
+  TEST_ASSERT_TRUE(fs.arrived && ss.arrived && sq.arrived);
+  TEST_ASSERT_TRUE(fs.overshoot <= DEADBAND && ss.overshoot <= DEADBAND && sq.overshoot <= DEADBAND);
+  // fast -> smooth: the drive steps from full to the feedforward of the speed
+  // the carriage has, not to a brake (an unseeded planner restarts at the
+  // floor: a drive step of about 300 duty)
+  TEST_ASSERT_TRUE_MESSAGE(fs.drive_jump <= 60, "fast -> smooth braked hard at the switch");
+  // a move time change keeps the reference: its one jump is at most a step
+  // of the larger of the two accelerations
+  int32_t step = max_step(move_profile_accel(890, 120));
+  TEST_ASSERT_TRUE_MESSAGE(ss.vref_jump <= step, "T=480 switch jumped the reference");
+  TEST_ASSERT_TRUE_MESSAGE(sq.vref_jump <= step, "T=120 switch jumped the reference");
+  TEST_ASSERT_TRUE(ss.arrival_us > smooth.arrival_us && sq.arrival_us < smooth.arrival_us);
+}
+
+void test_accel_guards_the_shortest_time() {
+  // T = 1 ms makes T^2 / 4 zero: the clamp, not a division by zero (the wire
+  // clamps at MOVE_PROFILE_TIME_MIN_MS; this is for every other caller)
+  TEST_ASSERT_EQUAL_UINT32(MOVE_PROFILE_ACCEL_MAX, move_profile_accel(1023, 1));
+  TEST_ASSERT_EQUAL_UINT32(MOVE_PROFILE_ACCEL_MAX, move_profile_accel(1, 1));
+  TEST_ASSERT_EQUAL_UINT32(MOVE_PROFILE_ACCEL_MAX, move_profile_accel(1023, 0));
+}
+
 void test_wire_time_is_clamped_and_mode_checked() {
   TEST_ASSERT_EQUAL_UINT16(MOVE_PROFILE_TIME_MIN_MS, move_profile_time_from_wire(0, 0));
   TEST_ASSERT_EQUAL_UINT16(MOVE_PROFILE_TIME_MIN_MS, move_profile_time_from_wire(0, 49));
@@ -491,5 +579,8 @@ int main(int, char**) {
   RUN_TEST(test_simulated_speed_byte_still_caps_a_smooth_move);
   RUN_TEST(test_simulated_move_time_scales_the_move);
   RUN_TEST(test_wire_time_is_clamped_and_mode_checked);
+  RUN_TEST(test_simulated_late_nearer_retarget_brakes_in_time);
+  RUN_TEST(test_simulated_profile_switch_mid_move_carries_the_speed);
+  RUN_TEST(test_accel_guards_the_shortest_time);
   return UNITY_END();
 }
