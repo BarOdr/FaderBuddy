@@ -207,8 +207,9 @@
  * How a remote move (a REG_LAYER_TARGET write, a layer change) gets from
  * here to there. A write is [reg, mode, time_hi, time_lo] and is taken whole
  * or not at all; a read is [reg], then [mode, time_hi, time_lo]. It takes
- * effect at once: a move under way carries its speed on under the new
- * profile.
+ * effect at the next move: a write during a move is kept until that move
+ * ends (a later write replaces it), so the move finishes under the profile
+ * it started with; a read until then shows the profile in force.
  *
  * mode  MOVE_PROFILE_SMOOTH (default): the fader eases out of rest, peaks
  *       mid-travel and eases into the target, like a motorised fader on a

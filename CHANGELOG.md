@@ -62,11 +62,12 @@ for production purposes.
   stay continuous. `REG_MOVE_PROFILE` (0x15, R/W, `[mode, time_hi, time_lo]`)
   selects `MOVE_PROFILE_SMOOTH` (1, the default) with a move time of
   50-2000 ms, or `MOVE_PROFILE_FAST` (0), the move of 1.8; it takes effect at
-  once and is not stored, so a host that wants another setting writes it
-  after every reset (gate on `FW_VERSION_MOVE_PROFILE`). The `LAYER_TARGET`
+  the next move (a write during a move is kept until it ends) and is not
+  stored, so a host that wants another setting writes it after every reset
+  (gate on `FW_VERSION_MOVE_PROFILE`). The `LAYER_TARGET`
   speed byte still caps a move in both profiles; 3- and 4-byte hosts work
   unchanged and get smooth moves without doing anything. Firmware without the
-  register reads back 0xFF bytes. Flash: the app is 14702 B of 14846
+  register reads back 0xFF bytes. Flash: the app is 14808 B of 14846
   (13696 before). Simulated against the reference plant only; not yet
   measured on a fader.
 - The remote-movement control law, its position and velocity filters and its

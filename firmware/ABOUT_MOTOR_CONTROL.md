@@ -252,10 +252,16 @@ each tick, outside the deadband:
   Small moves never leave the floor and are simply quick.
 - **Retargets stay continuous.** A new target in the same direction keeps the
   reference where it is and takes the larger of the two accelerations, so a
-  nearer target is still braked for in time and a farther one does not
-  restart from the floor. A reversal does start from the floor, as a fresh
-  move does, with the take-up ceiling re-armed: that is where the motor is
-  unloaded and the belt slack has to be crossed.
+  farther target does not restart from the floor and a nearer one is braked
+  for at the move's rate. A nearer target set so late that the reference is
+  already above the braking curve for what is left (no deceleration at that
+  rate reaches the floor in time) is the one retarget that costs a
+  discontinuity: the plan is put on the curve at once (`move_profile_cap`,
+  at plan time, since the step never brakes faster than the rate), and the
+  carriage still arrives without overshoot; the drive step is the host's
+  doing, as it would be on any fader. A reversal does start from the floor,
+  as a fresh move does, with the take-up ceiling re-armed: that is where the
+  motor is unloaded and the belt slack has to be crossed.
 - **Wrong-way references restart.** If the error changes sign without a new
   aim (an overshoot past the deadband), the next tick starts over at the
   floor toward the target, which is what `move_vref` would hand out for that
@@ -278,9 +284,14 @@ at runtime, per fader, with no per-flash configuration:
   `MOVE_PROFILE_TIME_DEFAULT_MS` (240) by default;
 - `MOVE_PROFILE_FAST` (0): the move of firmware up to 1.8, `T` ignored.
 
-A write takes effect at once, a move under way included: it carries its speed
-on under the new profile. The setting is not stored, so a host that wants fast
-moves, or another `T`, writes the register after every fader reset, gated on
+A write takes effect at the next move: a write during a move is kept until
+that move ends (a later write replaces it), so a move finishes under the
+profile it started with, and a read until then shows the profile in force.
+Re-planning a move under way from the speed it has (so that a fast move
+turned smooth carries on without a brake) was written and simulated, and did
+not fit the flash by about 300 B; it is the first thing to add if room ever
+appears. The setting is not stored, so a host that wants fast moves, or
+another `T`, writes the register after every fader reset, gated on
 `FW_VERSION_MOVE_PROFILE`. The host needs nothing for the default.
 
 ### What the simulation says
@@ -306,6 +317,7 @@ these say what the planner does when the plant does what the model says.
 | reversal 900 -> 10 at 60 ms | 216 ms | - | 4280 | 112 | 0 |
 | speed byte at 2000 counts/s, smooth / fast | 511 / 518 ms | 401 / 401 ms | 2000 | 112 / 130 | 0 |
 | half travel, T = 120 / 480 ms | 144 / 367 ms | 98 / 250 ms | 9861 / 2202 | 114 / 110 | 0 |
+| late nearer retarget 900 -> 400 / 500 / 600 at 100 / 120 / 140 ms | 134 / 152 / 169 ms | - | 6760 / 7783 / 7783 | 112 | 0 |
 
 The full-travel time is the same as the fast profile's because the plant,
 not the plan, sets it: the peak the triangle asks for (about 17000 counts/s
@@ -314,7 +326,9 @@ clipped by the drive ceiling and the move takes what it takes, now with soft
 ends. The distance independence shows from half travel down (181-205 ms for
 a quarter to a half), and `T` scales the move as it should where the plant
 can follow. The largest tick-to-tick change of the reference outside a
-reversal is 35 counts/s, against 137 for the fast profile.
+reversal is 35 counts/s, against 137 for the fast profile; the late nearer
+retargets, which cap the plan at once, are the exception (3700-4700 counts/s
+in one tick, and they overshot by 7-10 counts before the cap).
 
 ### Bench tuning
 
@@ -322,8 +336,8 @@ What to try on the fader, in this order, with the slow-motion camera next to
 an Automatone:
 
 1. **`T`** is the one knob. 240 ms matches the Automatone's full travel in the
-   model; try 200, 240 and 300 (write `0x15` as `[1, 0x00, T]`) and pick by
-   eye. Below about 150 ms the full-travel peak is out of the plant's reach
+   model; try 200, 240 and 300 (write `0x15` as `[1, T >> 8, T & 0xFF]`:
+   300 is `[1, 0x01, 0x2C]`) and pick by eye. Below about 150 ms the full-travel peak is out of the plant's reach
    and the profile degrades toward the fast one; above about 400 ms a full
    travel visibly dawdles.
 2. **Fast for comparison**: `[0, 0, 0]` on the same fader, same move. That is
@@ -343,6 +357,11 @@ an Automatone:
    profile it sets the plateau, and a move at a limited speed has soft ends
    too. The validated window in "Optional speed limiting" was measured with
    the fast profile and should be re-measured if a host relies on it.
+6. **A late nearer retarget** (a full-travel move retargeted to its middle
+   at about 100 ms) should stop at the new target without running past it;
+   the one visible step in the drive is the cap. **A profile or `T` written
+   mid-move** changes nothing until that move ends; the next move is under
+   the new setting.
 
 Nothing in the planner is per-unit: `a` comes from the distance and `T`, the
 floor is `move_law.vel_min`, which characterisation already sets, and the
@@ -359,7 +378,10 @@ is 16 bits in sixteenths of a count/s^2 (`4 d / T^2 / 16 = 62500 d /
 is worked out once per aim for the nominal tick, and the braking test is two
 16 x 16 products added and compared. A first version in signed Q8 with
 32-bit products and the measured tick overflowed `fb_app_only` by 290 B;
-this one fits with 144 B to spare. The cost is that a late control tick
+this one fits with 38 B to spare (the late-retarget cap took most of the
+rest, and needed one `control_law()` for the haptics and the move path to
+fit at all: with two callers of `move_drive()` the compiler had duplicated
+`move_vref()`). The cost is that a late control tick
 advances the reference a little less than the time that passed; the braking
 test is on the error, so that changes nothing about where a move ends.
 
@@ -754,9 +776,11 @@ the same step, as it was the one other `double`.
 
 The smooth profile (firmware 1.9) spent most of that again: planner, aim,
 `REG_MOVE_PROFILE` and the second reference path together are about 1000 B,
-and `fb_app_only` is at 14702 B of 14846. Its first version, in signed Q8
+and `fb_app_only` is at 14808 B of 14846. Its first version, in signed Q8
 with 32-bit products and the measured tick, did not fit by 290 B; the 16-bit
-form in `move_profile.h` is the difference. **144 B are left.**
+form in `move_profile.h` is the difference. **38 B are left.** A planner
+re-seeded from the measured velocity at a mid-move `REG_MOVE_PROFILE` write
+(about 300 B) was the first thing the budget refused.
 
 If a future change does not fit, measure before trimming: build, then
 `avr-nm -S --size-sort -C .pio/build/fb_app_only/firmware.elf | tail -20`
