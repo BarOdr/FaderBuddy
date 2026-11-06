@@ -13,8 +13,10 @@ the gains from it.
 
 Two different position scales appear in the code and in measurements:
 
-- **ADC counts** (0-1023). What the firmware works in: `input_ewma`,
-  `input_calib_min/max`, `target_adc`, all `MOVE_*` gains.
+- **ADC counts** (0-1023). What the firmware works in: `input_calib_min/max`,
+  `target_adc`, all `MOVE_*` gains. The filtered position `input_pos_q8` and
+  the error the law sees are ADC counts in Q8 (counts x 256), see "Fixed
+  point" below.
 - **raw** (0-2046). What the `STATE` register reports, because ADC1 runs with
   2x accumulation. `raw = 2 * ADC`.
 
@@ -307,15 +309,52 @@ still runs every pass, folding every completed ADC conversion into `input_ewma`
 on the `RESRDY` flag, so the position filter runs at the ADC's own constant rate
 and never re-uses or tears a result.
 
-Velocity is `d(input_ewma)/dt`, smoothed with a fixed time constant
-`VELOCITY_TAU_S`. `input_ewma` is a float fed by a dithered ADC, so its
-differences stay meaningful well below one ADC count - no need for a longer
-baseline. **dt is measured from the previous execution, not the scheduled tick
-time**; using the schedule silently skews the estimate whenever the loop cannot
-keep up.
+Velocity is `d(input_pos_q8)/dt`, smoothed with a fixed time constant
+`MOVE_VEL_TAU_US` (4 ms). The position is kept in Q8 and fed by a dithered
+ADC, so its differences stay meaningful well below one ADC count - no need for
+a longer baseline. **dt is measured from the previous execution, not the
+scheduled tick time**; using the schedule silently skews the estimate whenever
+the loop cannot keep up.
 
 At 2 kHz the main loop still runs 6-8 kHz, leaving headroom for `ptc_process`.
 At 250 us the loop saturates (loop rate == tick rate) with no margin; don't.
+
+## Fixed point
+
+The law, the filters and the ramps run in integer arithmetic (`move_law.h`;
+the float versions cost about 1.1 KB of avr-libc soft float, see "Flash
+budget"). The scales:
+
+| Quantity | Representation | Why |
+|---|---|---|
+| position, error | ADC counts in Q8 (`x 256`), `int32_t` | the ADC dither makes sub-count position meaningful; a full-scale difference times the Q16 filter coefficient still fits 32 bits |
+| velocity | whole ADC counts/s, `int32_t`, clamped to +-32767 | one count/s is far below anything the law resolves; the clamp keeps every product below in 32 bits |
+| duty | whole 0-254; the stall ramp and the take-up ceiling accumulate in Q8 | the ramps advance by fractions of a duty per tick |
+| `1/k`, `KV` | Q16, `uint16_t` (`MoveLaw::inv_k_q16`, `kv_q16`) | the only fractional gains; `MOVE_KV_Q16` 2621 is 0.04 |
+| slope, floor, deadband, breakaway | whole | they always were |
+
+What the representation costs, measured by the host tests in
+`firmware/test/test_move_law/` against the float law copied into them as the
+reference (`pio test -e native_test`, the numbers are printed):
+
+- position filter: within 0.013 ADC counts of the float EWMA over a dithered
+  full-scale sweep; a constant input settles within 10/256 count of itself
+  (the Q16 coefficient rounds a smaller difference to no step);
+- velocity estimate: within 4.5 counts/s of the float estimate through an
+  8000 counts/s move (one Q8 position step per 500 us tick is 7.8 counts/s);
+  the tick's alpha is kept in Q12, because at Q8 the 500 us tick's 0.125 was
+  quantised by 0.85% and drifted the estimate by tens of counts/s through a
+  transient;
+- control law: within 1 duty of the float law inside +-254 duty over 4.5 M
+  samples (four plants, five speed caps, full-scale error, +-8000 counts/s);
+  the deviation is the rounding of 1/k and KV to Q16 crossing an integer
+  boundary;
+- stall ramp and take-up ceiling: within 1 duty over a 450 ms episode; the
+  per-tick step is rounded so truncation cannot accumulate into a lag.
+
+`error == 0` takes the falling branch, as the float sign did. The lab build's
+`REG_DEBUG_GAINS` keeps its x1000 wire scaling, but the slope and the deadband
+now land on whole numbers and KV on Q16.
 
 ## Constants and how to change them
 
@@ -323,7 +362,7 @@ At 250 us the loop saturates (loop rate == tick rate) with no margin; don't.
 |---|---|---|
 | `CONTROL_TICK_US` | 500 | 2 kHz. Higher rates gain little; the limit is friction, not sample rate. |
 | `MOVE_VREF_SLOPE` | 50 | ADC/s of velocity reference per ADC count of error. The old `KP/KD`. Higher approaches faster and coasts in from further out. |
-| `MOVE_KV` | 0.04 | Velocity loop gain. **Default only** - scaled by `1/k` on a characterised unit, because `k*KV` is what sets damping. |
+| `MOVE_KV_Q16` | 2621 (0.04 in Q16) | Velocity loop gain. **Default only** - scaled by `1/k` on a characterised unit, because `k*KV` is what sets damping. |
 | `MOVE_BD_RISING/FALLING` | 68 / 86 | Assumed per-direction breakaway duty. **Default only** - measured on a characterised unit. |
 | `MOVE_K_DEFAULT` | 29 | Assumed ADC counts/sec per duty. **Default only** - measured. |
 | `MOVE_VEL_MIN` | 560 | Floor on the velocity reference, and so on the feedforward's clearance above breakaway. |
@@ -515,8 +554,19 @@ Three unrelated savings were taken at the same time and are worth not undoing:
 - `onI2cRequest` builds multi-byte replies through `i2c_write_u16`/`u32` helpers
   instead of writing bytes out at each call site.
 
+The control law itself was the last float on the chip: position EWMA,
+velocity estimate, `control_law()`, the ramps, the priming and the gain
+derivation (`1/k`, `1.16/k`) together pulled in `__addsf3`, `__mulsf3`,
+`__divsf3`, `__fp_*`, `__fixunssfsi`, `__floatunsisf` and their wrappers,
+about 1.1 KB. Moving the law to fixed point (`move_law.h`, "Fixed point"
+above) took the `fb_app_only` application from 14822 to 13696 bytes (the
+limit is 14846) with no soft-float symbol left in either build; the
+self-calibration's 0.995 span buffer went to per-mille integer arithmetic in
+the same step, as it was the one other `double`.
+
 If a future change does not fit, measure before trimming: build, then
-`avr-nm -S --size-sort -C .pio/build/fader_buddy/firmware.elf | tail -20`.
+`avr-nm -S --size-sort -C .pio/build/fb_app_only/firmware.elf | tail -20`
+(the toolchain's `avr-nm` lives under `~/.platformio/packages/toolchain-atmelavr*/bin/`).
 
 ## Optional speed limiting
 
@@ -647,5 +697,6 @@ ESPHome component logs all of it at startup.
   against `pos`.
 - **Clear `MODE_ERROR` between automated trials.** One latched error otherwise
   makes every later trial report a frozen fader.
-- Reported `err` from `REG_DEBUG_STATUS` is the same float the controller uses
-  and is the ground truth for steady-state accuracy.
+- Reported `err` from `REG_DEBUG_STATUS` is the controller's own Q8 error,
+  reported in eighths of a count, and is the ground truth for steady-state
+  accuracy.

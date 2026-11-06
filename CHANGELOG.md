@@ -49,6 +49,14 @@ for production purposes.
 
 ### Unreleased
 
+- The remote-movement control law, its position and velocity filters and its
+  ramps run in fixed point (`firmware/src/move_law.h`) instead of float. The
+  law is unchanged: host tests hold it against the float version over sweeps
+  of the inputs, and it stays within 1 duty of it (position within 0.013 ADC
+  counts, velocity within 4.5 counts/s). This frees the avr-libc soft float:
+  the app is 13696 B (14822 -> 13696), 1150 B below the 14846 B limit. No
+  register or version change; in DEBUG_DRIVE builds `REG_DEBUG_GAINS` keeps
+  its wire scaling but the slope and the deadband land on whole numbers.
 - `REG_IDLE_DURATION` (0x13) sets how long a fader must be still, with its
   touch released, before it goes idle and accepts position writes again. It
   was a fixed second; a host can now choose 100-5000 ms. The default is still

@@ -30,9 +30,9 @@ MotorCalData motor_cal = {0, {0, 0}, {0, 0}, {0, 0}};
 // See "Per-unit motor characterisation" in ABOUT_MOTOR_CONTROL.md for why a
 // fixed set of gains can't serve every unit and how these are derived.
 
-// Target open-loop gain for the velocity loop, k*KV, held constant across
-// units by scaling KV with 1/k. 1.16 is what the reference unit ran at.
-#define MOTORCAL_KV_LOOP_GAIN (1.16f)
+// The target open-loop gain for the velocity loop, k*KV, is held constant
+// across units by scaling KV with 1/k: MOVE_KV_LOOP_GAIN_Q16 (move_law.h),
+// 1.16, what the reference unit ran at.
 
 // Bounds on the derived velocity floor (1.25x the Stribeck jump).
 #define MOTORCAL_VEL_MIN_LO (200)
@@ -81,7 +81,9 @@ MotorCalData motor_cal = {0, {0, 0}, {0, 0}, {0, 0}};
 static uint32_t self_calibration_start = 0;
 static uint8_t self_calibration_stage = 0;
 #define SELF_CALIBRATION_TIMEOUT (1500)
-#define SELF_CALIBRATION_BUFFER (0.995)  // Buffer factor to prevent hitting physical limits
+// Buffer factor to keep the calibrated ends clear of the physical limits:
+// 0.995 of the measured span, as a per-mille weight (integer, no soft float).
+#define SELF_CALIBRATION_BUFFER_PERMILLE (995)
 static uint16_t self_calibration_adc_stage_0 = 0;
 static uint16_t self_calibration_adc_stage_1 = 0;
 
@@ -151,12 +153,12 @@ void apply_motor_calibration() {
   uint16_t vel_min = vjump + vjump / 4;  // 1.25x, for margin above the floor
   if (vel_min < MOTORCAL_VEL_MIN_LO) vel_min = MOTORCAL_VEL_MIN_LO;
   if (vel_min > MOTORCAL_VEL_MIN_HI) vel_min = MOTORCAL_VEL_MIN_HI;
-  move_vel_min = vel_min;
+  move_law.vel_min = vel_min;
 
   uint16_t deadband = (uint16_t)(((uint32_t)vel_min * MOTORCAL_STOP_TIME_MS + 500) / 1000);
   if (deadband < MOTORCAL_DEADBAND_LO) deadband = MOTORCAL_DEADBAND_LO;
   if (deadband > MOTORCAL_DEADBAND_HI) deadband = MOTORCAL_DEADBAND_HI;
-  move_deadband = deadband;
+  move_law.deadband = deadband;
 
   // Take-up ceiling: limits drive at the start of a move so the belt is not
   // engaged at full duty. It has to stay above the feedforward at the floor
@@ -168,18 +170,18 @@ void apply_motor_calibration() {
     if (ff > takeup) takeup = ff;
   }
   if (takeup > MOVE_MAX_DUTY) takeup = MOVE_MAX_DUTY;
-  move_takeup_duty = takeup;
+  move_law.takeup_duty = takeup;
 
-  // The only float work: the control law needs 1/k per direction for the
-  // feedforward, and the velocity loop gain scaled so its open-loop gain k*KV
-  // - the thing that actually sets damping - matches the reference unit's.
+  // The control law needs 1/k per direction for the feedforward, and the
+  // velocity loop gain scaled so its open-loop gain k*KV - the thing that
+  // actually sets damping - matches the reference unit's. Both in Q16.
   uint16_t k_avg = ((uint16_t)k[0] + k[1] + 1) / 2;
   if (k_avg < MOTORCAL_K_MIN) k_avg = MOTORCAL_K_MIN;
   if (k_avg > MOTORCAL_K_MAX) k_avg = MOTORCAL_K_MAX;
-  move_kv = MOTORCAL_KV_LOOP_GAIN / (float)k_avg;
+  move_law.kv_q16 = move_kv_q16(k_avg);
   for (uint8_t i = 0; i < 2; i++) {
-    move_bd[i] = bd[i];
-    move_inv_k[i] = 1.0f / (float)(k[i] ? k[i] : 1);
+    move_law.bd[i] = bd[i];
+    move_law.inv_k_q16[i] = move_inv_k_q16(k[i]);
   }
 }
 
@@ -193,8 +195,8 @@ static int8_t motorcal_dir() {
 // the carriage reaches the mechanical end rather than measuring a fader that
 // is being held by an endstop.
 static bool motorcal_out_of_band(int8_t dir) {
-  if (dir > 0) return input_ewma > input_calib_max - MOTORCAL_EDGE_MARGIN;
-  return input_ewma < input_calib_min + MOTORCAL_EDGE_MARGIN;
+  if (dir > 0) return input_pos_q8 > ((int32_t)(input_calib_max - MOTORCAL_EDGE_MARGIN) << MOVE_POS_SHIFT);
+  return input_pos_q8 < ((int32_t)(input_calib_min + MOTORCAL_EDGE_MARGIN) << MOVE_POS_SHIFT);
 }
 
 // Start a self-calibration run at the endpoint sweep.
@@ -208,10 +210,9 @@ MotorCalResult motorcal_tick(uint32_t now, uint16_t adc_raw) {
   // measurement stage, so they live here rather than in each case. The
   // runs drive open loop, so something has to stop them at the ends.
   int8_t dir = motorcal_dir();
-  // Speed along the direction of travel, as an integer once, so the
-  // measurement stages below never touch the float paths again. One ADC
-  // count/sec is far finer than anything derived from these needs.
-  int16_t speed = (int16_t)((dir > 0) ? velocity_ewma : -velocity_ewma);
+  // Speed along the direction of travel. One ADC count/sec is far finer than
+  // anything derived from these needs.
+  int16_t speed = (int16_t)((dir > 0) ? velocity_est : -velocity_est);
   if (self_calibration_stage >= SELFCAL_MOTOR_RAMP &&
       self_calibration_stage <= SELFCAL_MOTOR_DWELL_B &&
       motorcal_out_of_band(dir)) {
@@ -247,9 +248,11 @@ MotorCalResult motorcal_tick(uint32_t now, uint16_t adc_raw) {
         // Adopt the measured span, pulled in by the buffer factor so the
         // ends stay clear of the mechanical stops. Halved because the
         // stage readings are raw (2x accumulation) and the bounds are
-        // compared against input_ewma, which is in ADC counts.
-        input_calib_min = (SELF_CALIBRATION_BUFFER * self_calibration_adc_stage_0 + (1.0 - SELF_CALIBRATION_BUFFER) * self_calibration_adc_stage_1) / 2;
-        input_calib_max = (SELF_CALIBRATION_BUFFER * self_calibration_adc_stage_1 + (1.0 - SELF_CALIBRATION_BUFFER) * self_calibration_adc_stage_0) / 2;
+        // compared against the filtered position, which is in ADC counts.
+        input_calib_min = (uint16_t)(((uint32_t)SELF_CALIBRATION_BUFFER_PERMILLE * self_calibration_adc_stage_0 +
+                                      (uint32_t)(1000 - SELF_CALIBRATION_BUFFER_PERMILLE) * self_calibration_adc_stage_1) / 2000);
+        input_calib_max = (uint16_t)(((uint32_t)SELF_CALIBRATION_BUFFER_PERMILLE * self_calibration_adc_stage_1 +
+                                      (uint32_t)(1000 - SELF_CALIBRATION_BUFFER_PERMILLE) * self_calibration_adc_stage_0) / 2000);
 
         // Endpoints are known, so the motor characterisation that follows
         // has a calibrated span to keep itself inside. Persist once, at the
@@ -271,8 +274,8 @@ MotorCalResult motorcal_tick(uint32_t now, uint16_t adc_raw) {
       // reaching the far end, so it starts from the end it travels away
       // from. Runs alternate direction, so only the first park is long.
       bool parked = (dir > 0)
-          ? (input_ewma <= input_calib_min + MOTORCAL_PARK_MARGIN)
-          : (input_ewma >= input_calib_max - MOTORCAL_PARK_MARGIN);
+          ? (input_pos_q8 <= ((int32_t)(input_calib_min + MOTORCAL_PARK_MARGIN) << MOVE_POS_SHIFT))
+          : (input_pos_q8 >= ((int32_t)(input_calib_max - MOTORCAL_PARK_MARGIN) << MOVE_POS_SHIFT));
       if (parked || now > self_calibration_start + MOTORCAL_PARK_TIMEOUT) {
         motor_brake();
         self_calibration_stage = SELFCAL_MOTOR_SETTLE;
