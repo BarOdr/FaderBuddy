@@ -95,6 +95,11 @@ else:
     clamp |u| to (drive_ceiling + stiction_ramp), capped at MOVE_MAX_DUTY
 ```
 
+Since firmware 1.9 the first line, the position loop, is the **fast** profile
+only. By default the velocity reference comes from a planner instead
+(`move_profile.h`, "Smooth motion" below); everything from the speed clamp
+down is the same in both.
+
 **This is cascade control**: an outer position loop that asks for a velocity,
 and an inner velocity loop that delivers it. Worth seeing in those terms,
 because the previous flat form hid it - `u = KP*e - KD*v + FF` factors exactly
@@ -183,6 +188,188 @@ Two constraints prevent problems found during development:
 
 **Optional speed limit** (see below) is off by default and changes nothing when
 unset.
+
+## Smooth motion
+
+Firmware up to 1.8 moved the way the control law above reads: `v_ref =
+MOVE_VREF_SLOPE * error`, so a move starts at the largest reference it will
+ever see, runs flat out until the speed limit or the plant caps it, and
+approaches the target on an exponential tail. It is the quickest the mechanism
+moves (full travel in about 250 ms) and it looks like what it is: a jolt at
+the start, a coast at the end. The faders on a Chase Bliss Automatone, the
+reference Entity's faders are measured against, do the opposite: they ease
+out of rest, peak mid-travel and ease into the target, full travel in
+0.22-0.26 s with 10-90 % of the distance in 112-129 ms, half travel nearly as
+long, no visible overshoot, the same up and down (slow-motion video at
+240 fps, Preamp MKII fader).
+
+The host cannot produce that from outside. Streaming intermediate targets
+over I2C was tried (2026-10-21) and rejected: at 100 Hz the fader sees a
+staircase of short moves, each one a soft start and a brake, and the result is
+a shudder, not a curve. The shape has to come from inside the control tick,
+which is where `move_profile.h` puts it.
+
+### The planner
+
+A move keeps the cascade from "The control law" and replaces only its first
+line, the position loop, with an acceleration-limited plan on the velocity
+reference:
+
+```
+aim (move start, retarget):
+    a = 4 * |error| / T^2             # a velocity triangle of base T
+    fresh move or reversal:  v_ref = v_min toward the target
+    same-direction retarget: keep v_ref, a = max(a_old, a_new)
+each tick, outside the deadband:
+    if v_ref^2 - v_min^2 >= 2 * a * (|error| - deadband):  v_ref -= a * dt
+    else:                                                 v_ref += a * dt
+    |v_ref| clamped to the speed limit, floored at v_min
+```
+
+- **Soft start.** The reference starts at the Stribeck floor `v_min`, exactly
+  where `move_vref` holds it next to the target, so the first tick's drive
+  is `breakaway + v_min/k` plus the velocity loop's pull toward `v_min`:
+  about 110 duty on the reference unit instead of the 130 the take-up
+  ceiling clipped the fast profile's first tick to. Breakaway is still in the
+  feedforward from the first tick, so the carriage does not stick; it leaves
+  at the slowest speed it can move at, and the acceleration takes it from
+  there. The take-up ceiling and the stiction ramp are untouched and still
+  apply on top.
+- **Soft stop, on the error, not on a clock.** Every tick compares the
+  reference with the braking curve `sqrt(v_min^2 + 2 a (|error| - deadband))`:
+  the speed from which decelerating at `a` lands on the floor at the
+  deadband's edge. Above the curve the reference comes down at `a`, below it
+  it goes up, so a reference that has climbed too high for what is left
+  brakes at once and one that is on the curve rides it down to `v_min` and
+  into the deadband, where the brake takes over as before. Because the test
+  is on the measured error, a plant that lags the reference, a retarget, or a
+  hand slowing the carriage all end the same way; a clocked profile would
+  have finished its curve with the carriage still short of the target.
+- **Duration about independent of distance.** With `a = 4d/T^2` the triangle
+  has base `T` for every distance, so a quarter-travel move and a full-travel
+  move take about the same time, as the Automatone's do, until a peak the
+  plant cannot reach (above about 9000 counts/s) or the speed byte caps it.
+  Small moves never leave the floor and are simply quick.
+- **Retargets stay continuous.** A new target in the same direction keeps the
+  reference where it is and takes the larger of the two accelerations, so a
+  nearer target is still braked for in time and a farther one does not
+  restart from the floor. A reversal does start from the floor, as a fresh
+  move does, with the take-up ceiling re-armed: that is where the motor is
+  unloaded and the belt slack has to be crossed.
+- **Wrong-way references restart.** If the error changes sign without a new
+  aim (an overshoot past the deadband), the next tick starts over at the
+  floor toward the target, which is what `move_vref` would hand out for that
+  error.
+
+Everything else is as before: the velocity loop, the feedforward, the
+stiction ramp, the take-up ceiling, the brake in the deadband, the settle
+timer, the movement timeout and `MODE_ERROR`, the stall escape. The speed byte
+of `LAYER_TARGET` still caps the reference, so a host that limits a move gets a
+slower plateau with soft ends. Haptics use `move_vref` directly and are not
+touched.
+
+### Fast and smooth, and the move time
+
+`REG_MOVE_PROFILE` (0x15, `i2c_data.h`) selects the profile and the move time
+at runtime, per fader, with no per-flash configuration:
+
+- `MOVE_PROFILE_SMOOTH` (1, the default from reset) with a time `T` of
+  `MOVE_PROFILE_TIME_MIN_MS` (50) to `MOVE_PROFILE_TIME_MAX_MS` (2000) ms,
+  `MOVE_PROFILE_TIME_DEFAULT_MS` (240) by default;
+- `MOVE_PROFILE_FAST` (0): the move of firmware up to 1.8, `T` ignored.
+
+A write takes effect at once, a move under way included: it carries its speed
+on under the new profile. The setting is not stored, so a host that wants fast
+moves, or another `T`, writes the register after every fader reset, gated on
+`FW_VERSION_MOVE_PROFILE`. The host needs nothing for the default.
+
+### What the simulation says
+
+`test_move_profile` runs the whole loop (the filters, the planner, the drive,
+the take-up ceiling, the brake) against the first-order model of the reference
+plant from "The plant" (`k` 29, breakaway 68/86, coast tau 5 ms) at the
+2 kHz tick. It is a model, not a fader: it has no belt slack, no position
+noise and the reference unit's friction exactly. Bench numbers will differ;
+these say what the planner does when the plant does what the model says.
+
+| move, T = 240 ms | arrival | 10-90 % | peak v_ref | first drive | overshoot |
+|---|---|---|---|---|---|
+| full travel up (1003 counts), smooth | 253 ms | 164 ms | 8969 | 112 | 0 |
+| full travel down, smooth | 269 ms | 177 ms | 9212 | 130 | 0 |
+| full travel up, fast (1.8) | 257 ms | 161 ms | 50150 | 130 | 0 |
+| half (512), smooth | 205 ms | 130 ms | 4287 | 110 | 0 |
+| quarter (256), smooth | 181 ms | 127 ms | 2189 | 110 | 0 |
+| quarter, fast (1.8) | 112 ms | 71 ms | 12800 | 130 | 0 |
+| small (20 counts), smooth | 22 ms | - | 575 | 109 | 0 |
+| retarget 900 -> 500 at 60 ms | 163 ms | - | 5675 | 112 | 0 |
+| retarget 600 -> 1000 at 60 ms | 262 ms | 106 ms | 7909 | 111 | 0 |
+| reversal 900 -> 10 at 60 ms | 216 ms | - | 4280 | 112 | 0 |
+| speed byte at 2000 counts/s, smooth / fast | 511 / 518 ms | 401 / 401 ms | 2000 | 112 / 130 | 0 |
+| half travel, T = 120 / 480 ms | 144 / 367 ms | 98 / 250 ms | 9861 / 2202 | 114 / 110 | 0 |
+
+The full-travel time is the same as the fast profile's because the plant,
+not the plan, sets it: the peak the triangle asks for (about 17000 counts/s
+for full travel at 240 ms) is above what the motor does, so the reference is
+clipped by the drive ceiling and the move takes what it takes, now with soft
+ends. The distance independence shows from half travel down (181-205 ms for
+a quarter to a half), and `T` scales the move as it should where the plant
+can follow. The largest tick-to-tick change of the reference outside a
+reversal is 35 counts/s, against 137 for the fast profile.
+
+### Bench tuning
+
+What to try on the fader, in this order, with the slow-motion camera next to
+an Automatone:
+
+1. **`T`** is the one knob. 240 ms matches the Automatone's full travel in the
+   model; try 200, 240 and 300 (write `0x15` as `[1, 0x00, T]`) and pick by
+   eye. Below about 150 ms the full-travel peak is out of the plant's reach
+   and the profile degrades toward the fast one; above about 400 ms a full
+   travel visibly dawdles.
+2. **Fast for comparison**: `[0, 0, 0]` on the same fader, same move. That is
+   exactly firmware 1.8's move, the before picture.
+3. **Watch the start**, not only the curve: the first tick is at the floor,
+   so a unit with more breakaway than the feedforward assumes will sit for a
+   few ticks until the stiction ramp catches up (`MOVE_RAMP_RATE`). If the
+   start hesitates, characterise the unit (`motor_cal.cpp`) before touching
+   the planner; the planner has no breakaway of its own.
+4. **Watch the end** for the two failure shapes: a late brake (the carriage
+   overshoots the deadband and comes back from the floor) means the plant
+   coasts further than the model's 5 ms tau, and the deadband or the floor is
+   the place to look, as for the fast profile; an early brake (the carriage
+   creeps the last millimetre at the floor) means it stops shorter than the
+   model, which `T` does not fix either. Neither has shown in the model.
+5. **The speed byte** still works and is still unitless: with the smooth
+   profile it sets the plateau, and a move at a limited speed has soft ends
+   too. The validated window in "Optional speed limiting" was measured with
+   the fast profile and should be re-measured if a host relies on it.
+
+Nothing in the planner is per-unit: `a` comes from the distance and `T`, the
+floor is `move_law.vel_min`, which characterisation already sets, and the
+deadband is `move_law.deadband`. If a unit needs a different `T` the host
+writes it; there is no reason yet to store one.
+
+### Implementation notes
+
+The planner is integer and written for the ATtiny's flash (`move_profile.h`,
+"Fixed point" below for the rest of the loop): the reference is a 16-bit
+magnitude in quarter counts/s with its direction beside it, the acceleration
+is 16 bits in sixteenths of a count/s^2 (`4 d / T^2 / 16 = 62500 d /
+(T^2/4)`, two 16 x 16 products and one division per aim), the step per tick
+is worked out once per aim for the nominal tick, and the braking test is two
+16 x 16 products added and compared. A first version in signed Q8 with
+32-bit products and the measured tick overflowed `fb_app_only` by 290 B;
+this one fits with 144 B to spare. The cost is that a late control tick
+advances the reference a little less than the time that passed; the braking
+test is on the error, so that changes nothing about where a move ends.
+
+| constant | value | effect |
+|---|---|---|
+| `MOVE_PROFILE_TIME_DEFAULT_MS` | 240 | `T` from reset. The Automatone's full-travel time. |
+| `MOVE_PROFILE_TIME_MIN/MAX_MS` | 50 / 2000 | What a host may write; clamped. |
+| `MOVE_PROFILE_ACCEL_MAX` | 524288 | Clamp on `a`; reached at short `T` over long travels, where the plant could not follow anyway (full travel at this `a` would be 88 ms). Also what keeps the braking product in 32 bits. |
+| `MOVE_PROFILE_VEL_CAP` | 16000 | Clamp on the reference, twice the plant's reach; keeps its square in 32 bits. The speed byte, not this, is how a host limits a move. |
+| `MOVE_PROFILE_TICK_US` | 500 | The tick the step is worked out for; `CONTROL_TICK_US`. |
 
 ## Haptics
 
@@ -375,6 +562,7 @@ now land on whole numbers and KV on Q16.
 | `MOVE_SPEED_SLOWEST_MS` | 700 | Full-travel time at host speed 0. The slow end of the validated window. |
 | `MOVE_SPEED_FASTEST_MS` | 250 | Full-travel time at host speed 254. Faster than this the limiter stops biting. |
 | `MOVE_TIMEOUT_TOLERANCE` | 20 | On timeout, error below this goes idle instead of `MODE_ERROR`. |
+| `MOVE_PROFILE_*` | see "Smooth motion" | The smooth profile's move time and clamps. `MOVE_VREF_SLOPE` governs the fast profile only. |
 
 **The mechanism sets the minimum deadband.** Nothing moves
 below breakaway, and at breakaway speed jumps straight to `v_jump`, so the
@@ -563,6 +751,12 @@ above) took the `fb_app_only` application from 14822 to 13696 bytes (the
 limit is 14846) with no soft-float symbol left in either build; the
 self-calibration's 0.995 span buffer went to per-mille integer arithmetic in
 the same step, as it was the one other `double`.
+
+The smooth profile (firmware 1.9) spent most of that again: planner, aim,
+`REG_MOVE_PROFILE` and the second reference path together are about 1000 B,
+and `fb_app_only` is at 14702 B of 14846. Its first version, in signed Q8
+with 32-bit products and the measured tick, did not fit by 290 B; the 16-bit
+form in `move_profile.h` is the difference. **144 B are left.**
 
 If a future change does not fit, measure before trimming: build, then
 `avr-nm -S --size-sort -C .pio/build/fb_app_only/firmware.elf | tail -20`
