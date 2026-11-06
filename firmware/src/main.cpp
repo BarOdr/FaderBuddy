@@ -1512,7 +1512,7 @@ void process_i2c_requests() {
     switch (debug_gain_index) {
       // The x1000 scalings keep their wire format; the law is integer now, so
       // the slope and the deadband land on whole numbers and KV on Q16.
-      case DEBUG_GAIN_VREF_SLOPE: move_vref_slope = debug_gain_value / 1000; break;
+      case DEBUG_GAIN_VREF_SLOPE: move_vref_slope = move_law_slope_from_wire(debug_gain_value); break;
       case DEBUG_GAIN_KV: {
         uint32_t kv_q16 = ((uint32_t)debug_gain_value * 8192UL) / 125UL;  // x1000 -> Q16
         move_law.kv_q16 = (kv_q16 > 16383UL) ? 16383U : (uint16_t)kv_q16;

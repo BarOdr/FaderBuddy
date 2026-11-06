@@ -32,8 +32,9 @@
 //   gains      Q16 where fractional (1/k, KV); whole otherwise
 //
 // Ranges every product here relies on: position and error within +-1023
-// counts, velocity within +-MOVE_VEL_CLAMP, slope under 256, 1/k with k >= 2
-// (the characterisation never goes under K_MIN), kv_q16 under 2^14.
+// counts, velocity within +-MOVE_VEL_CLAMP, slope at most MOVE_VREF_SLOPE_MAX
+// (60), 1/k with k >= 2
+// (the characterisation never goes under K_MIN), kv_q16 at most 16383.
 // Resolution: the position filter settles within 10/256 of a count of its
 // input (the Q16 alpha rounds a smaller difference to no step), and one Q8
 // position step per 500 us tick is 7.8 counts/s of velocity.
@@ -115,6 +116,19 @@ static inline int32_t move_velocity_filter(int32_t velocity, int32_t dpos_q8, ui
   return velocity + (((dv - velocity) * (int32_t)alpha_q12 + 2048L) >> 12);
 }
 
+// The largest slope a host may set at runtime (the lab's REG_DEBUG_GAINS).
+// It is what keeps move_drive's products in 32 bits at the lab's other
+// extremes: |v_ref| at most 60 * 1023 = 61380, times 1/k at k = 2 (32768 in
+// Q16) is 2.01e9, and the velocity error at most 61380 + 32767 = 94147,
+// times the lab's largest kv (16383) is 1.54e9.
+#define MOVE_VREF_SLOPE_MAX (60)
+
+// The slope a REG_DEBUG_GAINS write of `per_mille` (slope x 1000) selects.
+static inline uint16_t move_law_slope_from_wire(uint32_t per_mille) {
+  uint32_t slope = per_mille / 1000UL;
+  return (slope > MOVE_VREF_SLOPE_MAX) ? (uint16_t)MOVE_VREF_SLOPE_MAX : (uint16_t)slope;
+}
+
 // Position loop: the signed velocity reference for `error_q8`
 // (target - position): slope * error, capped at `max_velocity` when that is
 // not 0 (MOVE_VEL_UNLIMITED), never below `vel_min` in magnitude.
@@ -122,7 +136,7 @@ static inline int32_t move_vref(int32_t error_q8, uint16_t slope, uint16_t max_v
   // error == 0 counts as falling, as the float law's sign did.
   bool rising = error_q8 > 0;
   int32_t mag_q8 = rising ? error_q8 : -error_q8;
-  // slope (whole, up to ~250) times 2^18 fits.
+  // slope (whole, at most MOVE_VREF_SLOPE_MAX) times 2^18 fits.
   int32_t mag = (mag_q8 * (int32_t)slope) >> MOVE_POS_SHIFT;  // |v_ref|
   if (max_velocity != 0 && mag > (int32_t)max_velocity) mag = max_velocity;
   if (mag < (int32_t)vel_min) mag = vel_min;
@@ -138,11 +152,13 @@ static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw&
   bool rising = v_ref > 0;
   int32_t mag = rising ? v_ref : -v_ref;
   uint8_t d = rising ? 1 : 0;  // MOTORCAL_RISING : MOTORCAL_FALLING
-  // |v_ref| is at most slope * 1023 (~2^16) and 1/k at most 2^15 in Q16, so
-  // the feedforward product fits; its Q16 drops to Q8 duty.
+  // |v_ref| is at most MOVE_VREF_SLOPE_MAX * 1023 = 61380 and 1/k at most
+  // 2^15 in Q16 (k >= 2), so the feedforward product is under 2.01e9 and
+  // fits; its Q16 drops to Q8 duty.
   int32_t ff_q8 = ((int32_t)g.bd[d] << MOVE_POS_SHIFT) + ((mag * (int32_t)g.inv_k_q16[d]) >> 8);
-  // Velocity error up to ~2^17, kv_q16 under 2^14 in practice (k_avg >= 8;
-  // DEBUG_GAINS is clamped to it), so this fits too.
+  // Velocity error at most 61380 + MOVE_VEL_CLAMP = 94147, kv_q16 at most
+  // 16383 (k_avg >= 8 gives 9503; DEBUG_GAINS is clamped to 16383), so this
+  // product is under 1.55e9 and fits too.
   int32_t verr = (rising ? mag : -mag) - velocity;
   int32_t fb_q8 = (verr * (int32_t)g.kv_q16) >> 8;
   int32_t u_q8 = (rising ? ff_q8 : -ff_q8) + fb_q8;
