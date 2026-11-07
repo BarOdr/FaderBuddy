@@ -157,7 +157,6 @@ static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw&
 }
 
 static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw& g, uint16_t kv_q16) {
-  (void)kv_q16;
   bool rising = v_ref > 0;
   int32_t mag = rising ? v_ref : -v_ref;
   uint8_t d = rising ? 1 : 0;  // MOTORCAL_RISING : MOTORCAL_FALLING
@@ -169,7 +168,7 @@ static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw&
   // 16383 (k_avg >= 8 gives 9503; DEBUG_GAINS is clamped to 16383), so this
   // product is under 1.55e9 and fits too.
   int32_t verr = (rising ? mag : -mag) - velocity;
-  int32_t fb_q8 = (verr * (int32_t)g.kv_q16) >> 8;
+  int32_t fb_q8 = (verr * (int32_t)kv_q16) >> 8;
   int32_t u_q8 = (rising ? ff_q8 : -ff_q8) + fb_q8;
   // Truncate toward zero, as (int16_t)float did. The result can exceed int16
   // only for an unphysical input; the caller clamps to +-MOVE_MAX_DUTY anyway.

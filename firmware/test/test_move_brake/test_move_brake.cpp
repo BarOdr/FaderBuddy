@@ -219,13 +219,14 @@ void test_brake_is_due_by_time_from_the_measured_speed() {
   // a longer brake time starts it earlier
   TEST_ASSERT_TRUE(move_brake_due(1000, 8000, 240, VEL_MIN));
   TEST_ASSERT_FALSE(move_brake_due(1028, 8000, 240, VEL_MIN));
-  // at the floor's speed only the floor's own distance: 560 / 2 * 0.12 = 33.6
-  TEST_ASSERT_TRUE(move_brake_due(33, 560, 120, VEL_MIN));
-  TEST_ASSERT_FALSE(move_brake_due(34, 560, 120, VEL_MIN));
+  // at the floor's speed only the floor's own distance over the brake
+  // time: 560 * 0.12 = 67.2
+  TEST_ASSERT_TRUE(move_brake_due(67, 560, 120, VEL_MIN));
+  TEST_ASSERT_FALSE(move_brake_due(68, 560, 120, VEL_MIN));
   // moving away, or at rest, counts as the floor's distance
-  TEST_ASSERT_TRUE(move_brake_due(33, 0, 120, VEL_MIN));
-  TEST_ASSERT_TRUE(move_brake_due(33, -5000, 120, VEL_MIN));
-  TEST_ASSERT_FALSE(move_brake_due(34, -5000, 120, VEL_MIN));
+  TEST_ASSERT_TRUE(move_brake_due(67, 0, 120, VEL_MIN));
+  TEST_ASSERT_TRUE(move_brake_due(67, -5000, 120, VEL_MIN));
+  TEST_ASSERT_FALSE(move_brake_due(68, -5000, 120, VEL_MIN));
   // no distance left: due at any speed and time
   TEST_ASSERT_TRUE(move_brake_due(0, 0, 50, VEL_MIN));
   // the distance to the run-in: error minus the deadband minus the run-in
@@ -263,12 +264,13 @@ void test_curve_falls_to_the_floor_at_the_run_in() {
   TEST_ASSERT_EQUAL_UINT16(FLOOR16, move_brake_curve16(a16, 0, FLOOR16, 1000));
   // seeded from just above the root, the same answers
   TEST_ASSERT_UINT16_WITHIN(1, 5665 / 16, move_brake_curve16(a16, 256, FLOOR16, 5665 / 16 + 2));
-  // seeded from under it (the position jittered up a count): within a unit
-  TEST_ASSERT_UINT16_WITHIN(1, 5665 / 16, move_brake_curve16(a16, 256, FLOOR16, 5665 / 16 - 1));
+  // seeded from under it (the position jittered up a count): the seed
+  TEST_ASSERT_EQUAL_UINT16(5665 / 16 - 1, move_brake_curve16(a16, 256, FLOOR16, 5665 / 16 - 1));
   // flat: the floor everywhere
   TEST_ASSERT_EQUAL_UINT16(FLOOR16, move_brake_curve16(0, 500, FLOOR16, 1000));
-  // the largest product stays in range: at the clamp over full travel
-  TEST_ASSERT_TRUE(move_brake_curve16(MOVE_BRAKE_ACCEL_MAX >> 4, 1023, FLOOR16, 1000) > 1000);
+  // the largest product stays in range: at the clamp over full travel,
+  // sqrt(35^2 + 32768 * 1023 / 8) = 2047
+  TEST_ASSERT_EQUAL_UINT16(2047, move_brake_curve16(MOVE_BRAKE_ACCEL_MAX >> 4, 1023, FLOOR16, 4000));
 }
 
 void test_step_brakes_on_the_curve_and_ends_at_the_floor() {

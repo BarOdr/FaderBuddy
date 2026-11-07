@@ -24,7 +24,7 @@
 #include "util.h"
 #include "motor_cal.h"
 #include "motor_control.h"
-#include "move_profile.h"
+#include "move_brake.h"
 #include "touch_inject.h"
 #include "haptic_engage.h"
 #include "haptic_notch.h"
@@ -131,12 +131,12 @@ int32_t drive_ceiling_q8 = (int32_t)MOVE_MAX_DUTY << MOVE_POS_SHIFT;  // take-up
 int8_t move_direction = 0;              // commanded direction of the move in progress
 int32_t velocity_est = 0;               // ADC counts/sec, + toward the motor end
 int32_t last_control_pos_q8 = 0;
-// The smooth profile's plan (move_profile.h) and REG_MOVE_PROFILE's setting:
-// the profile and the move time of the next move. Both are written only by the
-// main loop and read by the request ISR, as idle_duration_ms below.
-MoveProfile move_profile = {};
+// The smooth profile's plan (move_brake.h) and REG_MOVE_PROFILE's setting:
+// the profile and the brake time of the next move. Both are written only by
+// the main loop and read by the request ISR, as idle_duration_ms below.
+MoveBrake move_brake = {};
 volatile uint8_t move_profile_mode = MOVE_PROFILE_SMOOTH;
-volatile uint16_t move_profile_time_ms = MOVE_PROFILE_TIME_DEFAULT_MS;
+volatile uint16_t move_profile_time_ms = MOVE_BRAKE_TIME_DEFAULT_MS;
 uint32_t last_control_tick_us = 0;
 uint32_t last_control_exec_us = 0;
 uint32_t control_dt_us = CONTROL_TICK_US;  // measured interval of the current tick
@@ -825,9 +825,9 @@ void begin_remote_move() {
   if (!continuing) {
     drive_ceiling_q8 = (int32_t)move_law.takeup_duty << MOVE_POS_SHIFT;
   }
-  // The smooth profile plans the same way: a reversal or a fresh move starts
-  // at the floor, a retarget on the way carries the reference on.
-  move_profile_aim(move_profile, error_q8, move_profile_time_ms, move_law.vel_min, move_law.deadband, continuing);
+  // The smooth profile starts every plan cruising; its first tick decides
+  // whether the brake is already due for what is left.
+  move_brake_aim(move_brake, error_q8);
   move_direction = dir;
   remote_movement_start = now;
   remote_movement_start_position = move_q8_to_int(input_pos_q8);
@@ -934,7 +934,7 @@ void apply_move_speed(uint8_t speed) {
                 "MOVE_SPEED_FASTEST_MS must divide 1000 exactly, or use 32-bit math here");
   static_assert(1023UL * (1000 / MOVE_SPEED_FASTEST_MS) <= 65535UL, "span scaling overflows");
   // The smooth profile relies on the limit staying within its velocity cap.
-  static_assert(1023UL * (1000 / MOVE_SPEED_FASTEST_MS) <= MOVE_PROFILE_VEL_CAP, "speed limit exceeds the profile's cap");
+  static_assert(1023UL * (1000 / MOVE_SPEED_FASTEST_MS) <= MOVE_BRAKE_VEL_CAP, "speed limit exceeds the profile's cap");
   uint16_t fastest = span * (1000 / MOVE_SPEED_FASTEST_MS);
   uint16_t adc_per_sec =
       slowest + (uint16_t)(((uint32_t)(fastest - slowest) * speed) / (LAYER_SPEED_FULL - 1));
@@ -953,13 +953,21 @@ void apply_move_speed(uint8_t speed) {
 // See "The control law" in ABOUT_MOTOR_CONTROL.md for the derivation.
 //
 // A `smooth` move takes its velocity reference from the profile's plan
-// (move_profile.h) in place of the proportional one; the haptics and the
-// fast profile keep the proportional one. One function for both, so that
-// the velocity loop is in the flash once (the ATtiny's is nearly full).
+// (move_brake.h) in place of the proportional one, and a raised velocity
+// gain while it brakes; the haptics and the fast profile keep the
+// proportional one and the law's gain. One function for both, so that the
+// velocity loop is in the flash once (the ATtiny's is nearly full).
 static int16_t control_law(int32_t error_q8, uint16_t max_velocity, bool smooth) {
-  int32_t v_ref = smooth ? move_profile_step(move_profile, error_q8, max_velocity, move_law.vel_min, move_law.deadband)
-                         : move_vref(error_q8, move_vref_slope, max_velocity, move_law.vel_min);
-  return move_drive(v_ref, velocity_est, move_law);
+  int32_t v_ref;
+  uint16_t kv_q16 = move_law.kv_q16;
+  if (smooth) {
+    v_ref = move_brake_step(move_brake, error_q8, velocity_est, move_profile_time_ms, max_velocity, move_law.vel_min,
+                            move_law.deadband);
+    kv_q16 = move_brake_kv_q16(move_brake, kv_q16);
+  } else {
+    v_ref = move_vref(error_q8, move_vref_slope, max_velocity, move_law.vel_min);
+  }
+  return move_drive(v_ref, velocity_est, move_law, kv_q16);
 }
 
 // Haptic restoring force toward `target`, capped at `limit` duty. Because the
@@ -1134,7 +1142,7 @@ void motor_update() {
               position_window_upper = position_window_lower + WINDOW_SIZE;
             }
             input_last_change_millis = now - idle_duration_ms;
-            move_profile_end(move_profile);
+            move_brake_end(move_brake);
             set_mode(Mode::MODE_INPUT_IDLE);
           }
         }
