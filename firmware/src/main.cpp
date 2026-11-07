@@ -98,36 +98,38 @@ enum TapState : uint8_t {
 // Fixed-rate control tick, so gains and filter time constants keep the same
 // meaning regardless of how long touch processing takes on a given loop().
 #define CONTROL_TICK_US (500)           // 2 kHz (leaves loop headroom for touch)
-#define VELOCITY_TAU_S (0.004f)         // velocity estimate smoothing, seconds
+// The velocity estimate's smoothing time constant is MOVE_VEL_TAU_US (4 ms)
+// and the position filter's coefficient MOVE_POS_ALPHA_Q16 (0.05), in
+// move_law.h with the fixed-point law that uses them.
 
 // Live gains - declared in motor_control.h, derived by motor_cal.cpp, defined
 // here alongside the control law that consumes them. DEBUG_DRIVE builds let a
 // host overwrite them at runtime via REG_DEBUG_GAINS.
-float move_bd[2];
-float move_inv_k[2];
-float move_kv = MOVE_KV;
-int16_t move_takeup_duty = MOVE_TAKEUP_DUTY;
-float move_deadband = MOVE_DEADBAND;
-float move_vel_min = MOVE_VEL_MIN;
+MoveLaw move_law = {
+  {MOVE_BD_FALLING, MOVE_BD_RISING},
+  {MOVE_Q16_ONE / MOVE_K_DEFAULT, MOVE_Q16_ONE / MOVE_K_DEFAULT},
+  MOVE_KV_Q16, MOVE_VEL_MIN, MOVE_DEADBAND, MOVE_TAKEUP_DUTY,
+};
 #if DEBUG_DRIVE
 // Runtime-tunable copies, so gain sweeps don't need a reflash per trial.
-float move_vref_slope = MOVE_VREF_SLOPE;
-float move_ramp_rate = MOVE_RAMP_RATE;
-float move_takeup_ramp_rate = MOVE_TAKEUP_RAMP_RATE;
+uint16_t move_vref_slope = MOVE_VREF_SLOPE;
+uint16_t move_ramp_rate = MOVE_RAMP_RATE;
+uint16_t move_takeup_ramp_rate = MOVE_TAKEUP_RAMP_RATE;
 #else
 #define move_vref_slope MOVE_VREF_SLOPE
 #define move_ramp_rate MOVE_RAMP_RATE
 #define move_takeup_ramp_rate MOVE_TAKEUP_RAMP_RATE
 #endif
 
-const float ALPHA = 0.05;
-float input_ewma = 0;
-float stiction_ramp = 0;                // extra drive ramped in while stalled
-float move_max_velocity = MOVE_VEL_UNLIMITED;  // 0 = unlimited
-float drive_ceiling = MOVE_MAX_DUTY;    // take-up ceiling, re-armed on direction change
+// Control-loop state, in the fixed-point scales of move_law.h: positions and
+// the ramps in Q8, velocities whole.
+int32_t input_pos_q8 = 0;               // filtered position, ADC counts in Q8
+int32_t stiction_ramp_q8 = 0;           // extra drive ramped in while stalled, Q8 duty
+uint16_t move_max_velocity = MOVE_VEL_UNLIMITED;  // 0 = unlimited
+int32_t drive_ceiling_q8 = (int32_t)MOVE_MAX_DUTY << MOVE_POS_SHIFT;  // take-up ceiling, re-armed on direction change
 int8_t move_direction = 0;              // commanded direction of the move in progress
-float velocity_ewma = 0;                // ADC counts/sec, + toward the motor end
-float last_control_ewma = 0;
+int32_t velocity_est = 0;               // ADC counts/sec, + toward the motor end
+int32_t last_control_pos_q8 = 0;
 uint32_t last_control_tick_us = 0;
 uint32_t last_control_exec_us = 0;
 uint32_t control_dt_us = CONTROL_TICK_US;  // measured interval of the current tick
@@ -242,8 +244,8 @@ bool debug_drive_brake = false;
 uint32_t debug_drive_last_update = 0;
 
 // Snapshot of control-loop internals for REG_DEBUG_STATUS
-float debug_status_velocity = 0;
-float debug_status_error = 0;
+int32_t debug_status_velocity = 0;
+int32_t debug_status_error_q8 = 0;
 uint16_t debug_status_loop_hz = 0;
 uint16_t debug_status_tick_hz = 0;
 uint16_t debug_loop_count = 0;
@@ -293,7 +295,7 @@ void set_mode(Mode mode) {
 
   if (mode != MODE_REMOTE_MOVEMENT_IN_PROGRESS) {
     // Any fresh movement starts without accumulated stiction ramp.
-    stiction_ramp = 0;
+    stiction_ramp_q8 = 0;
   } else {
     // A commanded move is not local input, so drop any pending position-nonce
     // report - the host must not see the echo of its own command as a user move.
@@ -438,12 +440,12 @@ void onI2cRequest() {
 #if DEBUG_DRIVE
   } else if (r == REG_DEBUG_STATUS) {
       int16_t vel = (int16_t)debug_status_velocity;
-      int16_t err_x8 = (int16_t)(debug_status_error * 8);
+      int16_t err_x8 = (int16_t)(debug_status_error_q8 / (MOVE_POS_ONE / 8));  // truncated, as the float cast was
       const uint16_t vals[9] = {
         input_calib_min, input_calib_max, (uint16_t)target_adc,
         (uint16_t)motor_drive_value, (uint16_t)vel, (uint16_t)err_x8,
         debug_status_loop_hz, debug_status_tick_hz,
-        (uint16_t)move_max_velocity,
+        move_max_velocity,
       };
       for (uint8_t i = 0; i < 9; i++) i2c_write_u16(vals[i]);
 #endif
@@ -458,8 +460,8 @@ void onI2cRequest() {
         (uint8_t)motor_cal.vjump[MOTORCAL_FALLING],
         // What the control law actually runs with, derived or default, so a
         // host can see the outcome without knowing how it is derived.
-        (uint8_t)(((uint16_t)move_vel_min) >> 8), (uint8_t)move_vel_min,
-        (uint8_t)move_deadband,
+        (uint8_t)(move_law.vel_min >> 8), (uint8_t)move_law.vel_min,
+        (uint8_t)move_law.deadband,
       };
       Wire.write(vals, 12);
   } else if (r == REG_IDLE_DURATION) {
@@ -789,13 +791,13 @@ void begin_remote_move() {
   // re-armed when the commanded direction flips - not on every retarget, which
   // would otherwise pin a host that streams position updates at the take-up duty
   // forever.
-  int8_t dir = (target_adc > input_ewma) ? 1 : -1;
+  int8_t dir = (((int32_t)target_adc << MOVE_POS_SHIFT) > input_pos_q8) ? 1 : -1;
   if (get_mode() != MODE_REMOTE_MOVEMENT_IN_PROGRESS || dir != move_direction) {
-    drive_ceiling = move_takeup_duty;
+    drive_ceiling_q8 = (int32_t)move_law.takeup_duty << MOVE_POS_SHIFT;
   }
   move_direction = dir;
   remote_movement_start = now;
-  remote_movement_start_position = input_ewma;
+  remote_movement_start_position = move_q8_to_int(input_pos_q8);
   remote_movement_steady_start = now;
   set_mode(MODE_REMOTE_MOVEMENT_IN_PROGRESS);
 }
@@ -870,8 +872,8 @@ void adc_drain() {
   while (ADC1.INTFLAGS & ADC_RESRDY_bm) {
     uint16_t adc_val = ADC1.RES;  // reading RES clears RESRDY
     adc_last_raw = adc_val;
-    // 2x accumulation, so halve to get ADC counts
-    input_ewma = adc_val * ALPHA / 2 + input_ewma * (1 - ALPHA);
+    // 2x accumulation; the filter halves it to ADC counts
+    input_pos_q8 = move_pos_filter(input_pos_q8, adc_val);
   }
 }
 
@@ -907,22 +909,16 @@ void apply_move_speed(uint8_t speed) {
 }
 
 // Cascade control law, shared by remote moves and haptics: the position loop
-// turns error into a velocity reference, the velocity loop delivers it via
-// feedforward (plant inverted) plus feedback. Returns signed slow-decay duty,
-// unclamped; the caller owns the deadband and the drive ceiling. See "The
-// control law" in ABOUT_MOTOR_CONTROL.md for the derivation.
-static float control_law(float error, float max_velocity) {
-  float sign = (error > 0) ? 1.0f : -1.0f;
-  float mag = move_vref_slope * error * sign;   // |v_ref|
-  if (max_velocity > MOVE_VEL_UNLIMITED && mag > max_velocity) mag = max_velocity;
-  // Never ask for less than the mechanism can actually sustain: below the
-  // Stribeck floor it stick-slips rather than moving, and holding the
-  // reference here is also what keeps the feedforward clear of breakaway when
-  // the error is small.
-  if (mag < move_vel_min) mag = move_vel_min;
-
-  uint8_t d = (error > 0) ? MOTORCAL_RISING : MOTORCAL_FALLING;
-  return sign * (move_bd[d] + mag * move_inv_k[d]) + move_kv * (sign * mag - velocity_ewma);
+// turns error into a velocity reference (never under the Stribeck floor:
+// below it the mechanism stick-slips rather than moving, and holding the
+// reference there is also what keeps the feedforward clear of breakaway when
+// the error is small), the velocity loop delivers it via feedforward (plant
+// inverted) plus feedback. Returns signed slow-decay duty, unclamped; the
+// caller owns the deadband and the drive ceiling. Fixed point: move_law.h.
+// See "The control law" in ABOUT_MOTOR_CONTROL.md for the derivation.
+static int16_t control_law(int32_t error_q8, uint16_t max_velocity) {
+  int32_t v_ref = move_vref(error_q8, move_vref_slope, max_velocity, move_law.vel_min);
+  return move_drive(v_ref, velocity_est, move_law);
 }
 
 // Haptic restoring force toward `target`, capped at `limit` duty. Because the
@@ -934,12 +930,12 @@ static float control_law(float error, float max_velocity) {
 // Within `half_width` counts of the target only, fading out toward that edge
 // (haptic_notch.h); the centre notch sets it, the other haptics pull from
 // anywhere and leave it at its default.
-static void haptic_pull(float target, int16_t limit, int16_t half_width) {
-  float error = target - input_ewma;
-  int16_t drive = (int16_t)control_law(error, MOVE_VEL_UNLIMITED);
+static void haptic_pull(uint16_t target, int16_t limit, int16_t half_width) {
+  int32_t error_q8 = ((int32_t)target << MOVE_POS_SHIFT) - input_pos_q8;
+  int16_t drive = control_law(error_q8, MOVE_VEL_UNLIMITED);
   if (drive > limit) drive = limit;
   if (drive < -limit) drive = -limit;
-  motor_set(haptic_shape((int16_t)error, (int16_t)move_deadband, half_width, drive), true, MOTOR_IDLE_COAST);
+  motor_set(haptic_shape(move_q8_to_int(error_q8), move_law.deadband, half_width, drive), true, MOTOR_IDLE_COAST);
 }
 
 void motor_update() {
@@ -950,20 +946,14 @@ void motor_update() {
   // Velocity for the damping term: differentiate the filtered position, then
   // smooth with a fixed time constant. Dividing by the measured interval
   // rather than the nominal tick keeps the estimate correct even when a tick
-  // lands late, and input_ewma is a float fed by a dithered ADC, so its
+  // lands late, and the position is in Q8 fed by a dithered ADC, so its
   // differences stay meaningful well below one ADC count.
-  float dt = control_dt_us * 1e-6f;
-  if (dt > 0.0f) {
-    float dv = (input_ewma - last_control_ewma) / dt;
-    float alpha_v = dt / VELOCITY_TAU_S;
-    if (alpha_v > 1.0f) alpha_v = 1.0f;
-    velocity_ewma += alpha_v * (dv - velocity_ewma);
-  }
-  last_control_ewma = input_ewma;
+  velocity_est = move_velocity_filter(velocity_est, input_pos_q8 - last_control_pos_q8, control_dt_us);
+  last_control_pos_q8 = input_pos_q8;
 
 #if DEBUG_DRIVE
-  debug_status_velocity = velocity_ewma;
-  debug_status_error = target_adc - input_ewma;
+  debug_status_velocity = velocity_est;
+  debug_status_error_q8 = ((int32_t)target_adc << MOVE_POS_SHIFT) - input_pos_q8;
   debug_tick_count++;
   if (now - debug_rate_window_start >= 500) {
     debug_status_loop_hz = debug_loop_count * 2;
@@ -986,12 +976,12 @@ void motor_update() {
   // Hysteresis window: `position` only follows input_ewma once it leaves the
   // window, so ADC noise at rest can't read as user input.
   int16_t new_position = position;
-  if (input_ewma > position_window_upper) {
-    position_window_upper = input_ewma;
+  if (input_pos_q8 > ((int32_t)position_window_upper << MOVE_POS_SHIFT)) {
+    position_window_upper = move_q8_to_int(input_pos_q8);
     position_window_lower = position_window_upper - WINDOW_SIZE;
     new_position = position_window_upper;
-  } else if (input_ewma < position_window_lower) {
-    position_window_lower = input_ewma;
+  } else if (input_pos_q8 < ((int32_t)position_window_lower << MOVE_POS_SHIFT)) {
+    position_window_lower = move_q8_to_int(input_pos_q8);
     position_window_upper = position_window_lower + WINDOW_SIZE;
     new_position = position_window_lower;
   }
@@ -1012,8 +1002,8 @@ void motor_update() {
       // Host stopped refreshing - never leave the motor driven unattended
       debug_drive_active = false;
       d = 0;
-    } else if ((d > 0 && input_ewma > input_calib_max - DEBUG_DRIVE_EDGE_MARGIN) ||
-               (d < 0 && input_ewma < input_calib_min + DEBUG_DRIVE_EDGE_MARGIN)) {
+    } else if ((d > 0 && input_pos_q8 > ((int32_t)(input_calib_max - DEBUG_DRIVE_EDGE_MARGIN) << MOVE_POS_SHIFT)) ||
+               (d < 0 && input_pos_q8 < ((int32_t)(input_calib_min + DEBUG_DRIVE_EDGE_MARGIN) << MOVE_POS_SHIFT))) {
       // Don't drive into the endstops
       d = 0;
     }
@@ -1028,9 +1018,9 @@ void motor_update() {
         // fader that arrived but kept dithering across the deadband. The latter
         // is a tuning mismatch, not a failure, and reporting it as an error
         // leaves the fader dead until the host clears it.
-        float timeout_error = target_adc - input_ewma;
-        if (timeout_error < 0) timeout_error = -timeout_error;
-        if (timeout_error <= MOVE_TIMEOUT_TOLERANCE) {
+        int32_t timeout_error_q8 = ((int32_t)target_adc << MOVE_POS_SHIFT) - input_pos_q8;
+        if (timeout_error_q8 < 0) timeout_error_q8 = -timeout_error_q8;
+        if (timeout_error_q8 <= ((int32_t)MOVE_TIMEOUT_TOLERANCE << MOVE_POS_SHIFT)) {
           motor_coast();
           input_last_change_millis = now - idle_duration_ms;
           set_mode(Mode::MODE_INPUT_IDLE);
@@ -1045,58 +1035,57 @@ void motor_update() {
           apply_layer_change(pending_layer_change);
           break;  // Exit switch since state may change
         }
-        float error = target_adc - input_ewma;
-        if (error > move_deadband || error < -move_deadband) {
+        int32_t error_q8 = ((int32_t)target_adc << MOVE_POS_SHIFT) - input_pos_q8;
+        int32_t deadband_q8 = (int32_t)move_law.deadband << MOVE_POS_SHIFT;
+        if (error_q8 > deadband_q8 || error_q8 < -deadband_q8) {
           // Ramp in extra drive only while stalled. The feedforward is derived
           // to sit above breakaway, so this should now be rare - it covers
           // measurement error, a cold or stiff unit, and the uncharacterised
           // case.
-          float speed = velocity_ewma < 0 ? -velocity_ewma : velocity_ewma;
+          int32_t speed = velocity_est < 0 ? -velocity_est : velocity_est;
           if (speed < MOVE_STALL_VELOCITY) {
-            stiction_ramp += move_ramp_rate * dt;
-            if (stiction_ramp > MOVE_RAMP_MAX) stiction_ramp = MOVE_RAMP_MAX;
-          } else if (stiction_ramp > 0) {
+            stiction_ramp_q8 += move_ramp_step_q8(move_ramp_rate, control_dt_us);
+            if (stiction_ramp_q8 > ((int32_t)MOVE_RAMP_MAX << MOVE_POS_SHIFT)) stiction_ramp_q8 = (int32_t)MOVE_RAMP_MAX << MOVE_POS_SHIFT;
+          } else if (stiction_ramp_q8 > 0) {
             // Shed it quickly once the carriage breaks free, but not in one
             // step: dropping up to MOVE_RAMP_MAX of drive instantly is itself a
             // relay, and around the stall threshold it chatters. A few tens of
             // ms is far shorter than the coast time, so it still cannot
             // contribute to overshoot.
-            stiction_ramp -= MOVE_RAMP_DECAY_RATE * dt;
-            if (stiction_ramp < 0) stiction_ramp = 0;
+            stiction_ramp_q8 -= move_ramp_step_q8(MOVE_RAMP_DECAY_RATE, control_dt_us);
+            if (stiction_ramp_q8 < 0) stiction_ramp_q8 = 0;
           }
           // The shared control law plus stall escape, signed toward the target.
-          float u = control_law(error, move_max_velocity) +
-                    ((error > 0) ? stiction_ramp : -stiction_ramp);
+          int16_t ramp = move_q8_to_int(stiction_ramp_q8);
+          int32_t u = (int32_t)control_law(error_q8, move_max_velocity) + ((error_q8 > 0) ? ramp : -ramp);
 
           // Drive ceiling opens up over time from the take-up value, easing
           // the motor through belt backlash instead of stepping to full duty.
-          drive_ceiling += move_takeup_ramp_rate * dt;
-          if (drive_ceiling > MOVE_MAX_DUTY) drive_ceiling = MOVE_MAX_DUTY;
-          int16_t limit = (int16_t)drive_ceiling + (int16_t)stiction_ramp;
+          drive_ceiling_q8 += move_ramp_step_q8(move_takeup_ramp_rate, control_dt_us);
+          if (drive_ceiling_q8 > ((int32_t)MOVE_MAX_DUTY << MOVE_POS_SHIFT)) drive_ceiling_q8 = (int32_t)MOVE_MAX_DUTY << MOVE_POS_SHIFT;
+          int16_t limit = move_q8_to_int(drive_ceiling_q8) + ramp;
           if (limit > MOVE_MAX_DUTY) limit = MOVE_MAX_DUTY;
 
-          int16_t drive = (int16_t)u;
-          if (drive > limit) drive = limit;
-          if (drive < -limit) drive = -limit;
+          int16_t drive = (u > limit) ? limit : (u < -limit) ? -limit : (int16_t)u;
           motor_set(drive, true, MOTOR_IDLE_BRAKE);
           remote_movement_steady_start = now;
         } else {
           // On target: hold with the bridge braked until we declare the move
           // finished, so a loose carriage can't drift back out of the window.
-          stiction_ramp = 0;
+          stiction_ramp_q8 = 0;
           motor_brake();
           if (now > remote_movement_steady_start + REMOTE_MOVEMENT_STEADY_THRESHOLD) {
             // Re-centre the hysteresis window on where we stopped. A move
             // that ends with the carriage near a window bound would otherwise
             // let ADC noise read as immediate user input.
-            if (input_ewma < WINDOW_SIZE / 2) {
+            if (input_pos_q8 < ((int32_t)(WINDOW_SIZE / 2) << MOVE_POS_SHIFT)) {
               position_window_lower = 0;
               position_window_upper = WINDOW_SIZE;
-            } else if (input_ewma > 1023 - WINDOW_SIZE / 2) {
+            } else if (input_pos_q8 > ((int32_t)(1023 - WINDOW_SIZE / 2) << MOVE_POS_SHIFT)) {
               position_window_upper = 1023;
               position_window_lower = 1023 - WINDOW_SIZE;
             } else {
-              position_window_lower = input_ewma - WINDOW_SIZE / 2;
+              position_window_lower = move_q8_to_int(input_pos_q8) - WINDOW_SIZE / 2;
               position_window_upper = position_window_lower + WINDOW_SIZE;
             }
             input_last_change_millis = now - idle_duration_ms;
@@ -1137,9 +1126,9 @@ void motor_update() {
         uint8_t detent_count = (haptic_config & HAPTIC_DETENT_COUNT_bm) >> HAPTIC_DETENT_COUNT_bp;
         if (haptic_mode == HAPTIC_SMOOTH_WITH_MAGNET_ENDS) {
           // Magnetic endpoints - pull toward calibration limits when near
-          if (input_ewma < input_calib_min + HAPTIC_MAGNET_RANGE) {
+          if (input_pos_q8 < ((int32_t)(input_calib_min + HAPTIC_MAGNET_RANGE) << MOVE_POS_SHIFT)) {
             target = input_calib_min;
-          } else if (input_ewma > input_calib_max - HAPTIC_MAGNET_RANGE) {
+          } else if (input_pos_q8 > ((int32_t)(input_calib_max - HAPTIC_MAGNET_RANGE) << MOVE_POS_SHIFT)) {
             target = input_calib_max;
           } else {
             pull = false;
@@ -1157,7 +1146,7 @@ void motor_update() {
             half_width = haptic_step_notch_half_width(
                 haptic_config, haptic_step_notch_held((state & STATE_TOUCH_bm) != 0, now - touch_state_change_millis));
           }
-          target = get_nearest_detent_position(detent_count, input_ewma);
+          target = get_nearest_detent_position(detent_count, (uint16_t)move_q8_to_int(input_pos_q8));
         } else if (haptic_mode == HAPTIC_PLACED_NOTCHES) {
           // Placed notches: only under the hand, released no force at all, so
           // a fader let go stays where it is and its value does not change
@@ -1319,8 +1308,8 @@ void setup() {
   // tick doesn't see a huge phantom velocity as the filter slews up from zero.
   while (!(ADC1.INTFLAGS & ADC_RESRDY_bm)) { }
   adc_last_raw = ADC1.RES;
-  input_ewma = adc_last_raw / 2.0f;
-  last_control_ewma = input_ewma;
+  input_pos_q8 = (int32_t)adc_last_raw << (MOVE_POS_SHIFT - 1);  // raw is 2x
+  last_control_pos_q8 = input_pos_q8;
   last_control_tick_us = micros();
   last_control_exec_us = last_control_tick_us;
 
@@ -1473,17 +1462,23 @@ void process_i2c_requests() {
 #if DEBUG_DRIVE
   if (has_debug_gain) {
     switch (debug_gain_index) {
-      case DEBUG_GAIN_VREF_SLOPE: move_vref_slope = debug_gain_value / 1000.0f; break;
-      case DEBUG_GAIN_KV:         move_kv = debug_gain_value / 1000.0f; break;
-      case DEBUG_GAIN_BD_RISING:  move_bd[MOTORCAL_RISING] = debug_gain_value; break;
-      case DEBUG_GAIN_BD_FALLING: move_bd[MOTORCAL_FALLING] = debug_gain_value; break;
-      case DEBUG_GAIN_K:
-        move_inv_k[0] = move_inv_k[1] = 1.0f / (float)(debug_gain_value ? debug_gain_value : 1);
+      // The x1000 scalings keep their wire format; the law is integer now, so
+      // the slope and the deadband land on whole numbers and KV on Q16.
+      case DEBUG_GAIN_VREF_SLOPE: move_vref_slope = move_law_slope_from_wire(debug_gain_value); break;
+      case DEBUG_GAIN_KV: {
+        uint32_t kv_q16 = ((uint32_t)debug_gain_value * 8192UL) / 125UL;  // x1000 -> Q16
+        move_law.kv_q16 = (kv_q16 > 16383UL) ? 16383U : (uint16_t)kv_q16;
         break;
-      case DEBUG_GAIN_VEL_MIN:    move_vel_min = debug_gain_value; break;
-      case DEBUG_GAIN_DEADBAND:   move_deadband = debug_gain_value / 1000.0f; break;
+      }
+      case DEBUG_GAIN_BD_RISING:  move_law.bd[MOTORCAL_RISING] = debug_gain_value; break;
+      case DEBUG_GAIN_BD_FALLING: move_law.bd[MOTORCAL_FALLING] = debug_gain_value; break;
+      case DEBUG_GAIN_K:
+        move_law.inv_k_q16[0] = move_law.inv_k_q16[1] = move_inv_k_q16(debug_gain_value < 2 ? 2 : debug_gain_value);
+        break;
+      case DEBUG_GAIN_VEL_MIN:    move_law.vel_min = debug_gain_value; break;
+      case DEBUG_GAIN_DEADBAND:   move_law.deadband = debug_gain_value / 1000; break;
       case DEBUG_GAIN_RAMP_RATE:  move_ramp_rate = debug_gain_value; break;
-      case DEBUG_GAIN_TAKEUP:     move_takeup_duty = debug_gain_value; break;
+      case DEBUG_GAIN_TAKEUP:     move_law.takeup_duty = debug_gain_value; break;
       case DEBUG_GAIN_TAKEUP_RAMP: move_takeup_ramp_rate = debug_gain_value; break;
       // Override the calibration bounds (RAM only, not persisted) so a
       // miscalibrated fader - one whose stored range exceeds its physical

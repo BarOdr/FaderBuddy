@@ -356,7 +356,9 @@ static inline uint16_t idle_duration_from_wire(uint8_t high, uint8_t low) {
  * REG_DEBUG_GAINS (0xF2) - write-only, DEBUG_DRIVE builds only.
  * Write [0xF2, index, value_hi, value_lo] to override one control-loop gain at
  * runtime, so tuning doesn't need a reflash per trial. Values are fixed point:
- * KP and KD are scaled by 1000, the rest are integers.
+ * the x1000 ones are scaled by 1000, the rest are integers. The law runs in
+ * integer arithmetic (move_law.h), so the slope and the deadband land on whole
+ * numbers (a fraction is dropped) and KV on Q16 (capped at 0.25).
  */
 #define REG_DEBUG_GAINS 0xF2
 #define DEBUG_GAIN_VREF_SLOPE  (0)  // velocity reference per ADC count of error, x1000
