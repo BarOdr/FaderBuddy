@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (8)
+#define FW_VERSION_MINOR (9)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -88,6 +88,11 @@
 // REG_LAYER_NOTCHES. Older firmware stores the config but coasts on the
 // unknown mode, so a fader there stays free; no protocol-version bump.
 #define FW_VERSION_PLACED_NOTCHES (0x0108)  // 1.8
+
+// Minimum firmware version that moves on the smooth profile by default and
+// implements REG_MOVE_PROFILE. Older firmware moves as MOVE_PROFILE_FAST and
+// ignores the register; no protocol-version bump.
+#define FW_VERSION_MOVE_PROFILE (0x0109)  // 1.9
 
 
 /*
@@ -138,7 +143,9 @@
  * -----|---------------------|---------|------|------------
  * 0x14 | LAYER_NOTCHES       | R/W     |u8[4] | Placed notch positions (layer-addressed, see below; FW 1.8+)
  * -----|---------------------|---------|------|------------
- * 0x15 | ...                 |         |      | (free - next production register goes here)
+ * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + brake time in ms (see below; FW 1.9+)
+ * -----|---------------------|---------|------|------------
+ * 0x16 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -192,6 +199,62 @@
 #define REG_MOTOR_CAL 0x12  // Measured motor characteristics (R, 12 bytes, see below)
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
 #define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
+#define REG_MOVE_PROFILE 0x15  // Move profile: mode + brake time (R/W, u8 + u16 big-endian, see below)
+
+/*
+ * REG_MOVE_PROFILE (0x15) - read/write, 3 bytes, FW 1.9+.
+ *
+ * How a remote move (a REG_LAYER_TARGET write, a layer change) gets from
+ * here to there. A write is [reg, mode, time_hi, time_lo] and is taken whole
+ * or not at all; a read is [reg], then [mode, time_hi, time_lo]. It takes
+ * effect at the next move: a write during a move is kept until that move
+ * ends (a later write replaces it), so the move finishes under the profile
+ * it started with; a read until then shows the profile in force.
+ *
+ * mode  MOVE_PROFILE_SMOOTH (default): the fader moves as fast as it can,
+ *       as MOVE_PROFILE_FAST does, and decelerates over the last part of
+ *       the travel into the target, without overshoot. The brake is planned
+ *       from the speed the fader has, so a short move that never reaches
+ *       speed is simply quick.
+ *       MOVE_PROFILE_FAST: the move of firmware up to 1.8, full drive from
+ *       the first tick and an exponential approach to the target; the
+ *       quickest the mechanism moves. `time` is ignored. A write with any
+ *       other mode value is ignored.
+ * time  the smooth move's brake time, ms: how long the deceleration takes
+ *       from the speed the fader has down to its slowest speed. Longer
+ *       starts the brake earlier and lands more gently; it does not slow
+ *       the rest of the move. MOVE_PROFILE_TIME_MIN_MS to
+ *       MOVE_PROFILE_TIME_MAX_MS; a write outside is clamped. 120 by
+ *       default (MOVE_BRAKE_TIME_DEFAULT_MS in firmware/src/move_brake.h;
+ *       MOVE_PROFILE_TIME_DEFAULT_MS below was the first design's default
+ *       and is not what the firmware starts at).
+ *
+ * In both modes the REG_LAYER_TARGET speed byte still caps the speed of the
+ * move. Not stored: every reset starts at MOVE_PROFILE_SMOOTH and the
+ * default brake time, so a host that wants another setting writes it again
+ * after the fader resets. Firmware without this register moves as
+ * MOVE_PROFILE_FAST and reads back 0xFF bytes (see FW_VERSION_NONE).
+ */
+#define MOVE_PROFILE_FAST (0)
+#define MOVE_PROFILE_SMOOTH (1)
+// The first design's default move time; the firmware starts at
+// MOVE_BRAKE_TIME_DEFAULT_MS (move_brake.h), kept here for test_move_profile.
+#define MOVE_PROFILE_TIME_DEFAULT_MS (240)
+#define MOVE_PROFILE_TIME_MIN_MS (50)
+#define MOVE_PROFILE_TIME_MAX_MS (2000)
+
+// Whether a REG_MOVE_PROFILE mode byte names a profile.
+static inline bool move_profile_mode_valid(uint8_t mode) {
+  return mode == MOVE_PROFILE_FAST || mode == MOVE_PROFILE_SMOOTH;
+}
+
+// The brake time a REG_MOVE_PROFILE write of these two bytes selects.
+static inline uint16_t move_profile_time_from_wire(uint8_t high, uint8_t low) {
+  uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
+  if (ms < MOVE_PROFILE_TIME_MIN_MS) return MOVE_PROFILE_TIME_MIN_MS;
+  if (ms > MOVE_PROFILE_TIME_MAX_MS) return MOVE_PROFILE_TIME_MAX_MS;
+  return ms;
+}
 
 /*
  * REG_LAYER_NOTCHES (0x14) - read/write, layer-addressed, FW 1.8+.

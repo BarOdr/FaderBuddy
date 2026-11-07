@@ -147,8 +147,16 @@ static inline int32_t move_vref(int32_t error_q8, uint16_t slope, uint16_t max_v
 // measured `velocity`: feedforward (plant inverted, breakaway + |v_ref|/k in
 // the direction of v_ref) plus kv * (v_ref - velocity). Truncated toward zero
 // as the float law's output was when cast; unclamped, the caller owns the
-// deadband and the drive ceiling.
+// deadband and the drive ceiling. The overload with `kv_q16` runs the loop
+// with that gain in place of the law's (the smooth profile's brake raises
+// it, move_brake.h); it must stay within 16383, as the law's is.
+static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw& g, uint16_t kv_q16);
+
 static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw& g) {
+  return move_drive(v_ref, velocity, g, g.kv_q16);
+}
+
+static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw& g, uint16_t kv_q16) {
   bool rising = v_ref > 0;
   int32_t mag = rising ? v_ref : -v_ref;
   uint8_t d = rising ? 1 : 0;  // MOTORCAL_RISING : MOTORCAL_FALLING
@@ -160,7 +168,7 @@ static inline int16_t move_drive(int32_t v_ref, int32_t velocity, const MoveLaw&
   // 16383 (k_avg >= 8 gives 9503; DEBUG_GAINS is clamped to 16383), so this
   // product is under 1.55e9 and fits too.
   int32_t verr = (rising ? mag : -mag) - velocity;
-  int32_t fb_q8 = (verr * (int32_t)g.kv_q16) >> 8;
+  int32_t fb_q8 = (verr * (int32_t)kv_q16) >> 8;
   int32_t u_q8 = (rising ? ff_q8 : -ff_q8) + fb_q8;
   // Truncate toward zero, as (int16_t)float did. The result can exceed int16
   // only for an unphysical input; the caller clamps to +-MOVE_MAX_DUTY anyway.

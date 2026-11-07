@@ -49,6 +49,29 @@ for production purposes.
 
 ### Unreleased
 
+- **Firmware 1.9: smooth motion.** A remote move takes off and cruises
+  exactly as before (full drive, the quickest the mechanism moves) and
+  decelerates only at the end: a brake planned inside the control loop from
+  the carriage's measured speed brings the velocity reference down a
+  constant-deceleration curve to the Stribeck floor just short of the
+  deadband, with the velocity gain doubled while it brakes
+  (`firmware/src/move_brake.h`, "Smooth motion" in
+  `firmware/ABOUT_MOTOR_CONTROL.md`); the velocity loop, the feedforward, the
+  stall escape, the take-up ceiling, the deadband, the timeouts and the
+  haptics are unchanged. `REG_MOVE_PROFILE` (0x15, R/W, `[mode, time_hi,
+  time_lo]`) selects `MOVE_PROFILE_SMOOTH` (1, the default) with a brake time
+  of 50-2000 ms (120 by default: full travel in about 0.25 s, the last half
+  of it braking), or `MOVE_PROFILE_FAST` (0), the move of 1.8; it takes
+  effect at the next move (a write during a move is kept until it ends) and
+  is not stored, so a host that wants another setting writes it after every
+  reset (gate on `FW_VERSION_MOVE_PROFILE`). The `LAYER_TARGET` speed byte
+  still caps a move in both profiles; 3- and 4-byte hosts work unchanged and
+  get smooth moves without doing anything. Firmware without the register
+  reads back 0xFF bytes. Flash: the app is 14808 B of 14846 (13696 before).
+  Accepted on the bench (2026-11-07, board 0: overshoot 2-5 counts, no
+  bounce) and running on all eight boards; a first design, a velocity
+  triangle over the whole move (`move_profile.h`, still in the tree with its
+  tests), bounced on the bench and was replaced before release.
 - The remote-movement control law, its position and velocity filters and its
   ramps run in fixed point (`firmware/src/move_law.h`) instead of float. The
   law is unchanged: host tests hold it against the float version over sweeps

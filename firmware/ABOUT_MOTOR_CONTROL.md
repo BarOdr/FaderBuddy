@@ -95,6 +95,12 @@ else:
     clamp |u| to (drive_ceiling + stiction_ramp), capped at MOVE_MAX_DUTY
 ```
 
+Since firmware 1.9 the first line, the position loop, is the **fast** profile
+only. By default the velocity reference is the cap until a brake planned
+on the measured speed and error takes over (`move_brake.h`, "Smooth motion"
+below); everything from the speed clamp down is the same in both, except
+the velocity gain, which the brake doubles.
+
 **This is cascade control**: an outer position loop that asks for a velocity,
 and an inner velocity loop that delivers it. Worth seeing in those terms,
 because the previous flat form hid it - `u = KP*e - KD*v + FF` factors exactly
@@ -183,6 +189,224 @@ Two constraints prevent problems found during development:
 
 **Optional speed limit** (see below) is off by default and changes nothing when
 unset.
+
+## Smooth motion
+
+Firmware up to 1.8 moved the way the control law above reads: `v_ref =
+MOVE_VREF_SLOPE * error`, so a move starts at the largest reference it will
+ever see, runs flat out until the speed limit or the plant caps it, and
+approaches the target on an exponential tail. It is the quickest the mechanism
+moves (full travel in about 250 ms) and it looks like what it is: a jolt at
+the start, a coast at the end. The faders on a Chase Bliss Automatone, the
+reference Entity's faders are measured against, ease into the target: full
+travel in 0.22-0.26 s with 10-90 % of the distance in 112-129 ms, overshoot
+under 1 %, the same up and down (slow-motion video at 240 fps, Preamp MKII
+fader).
+
+The host cannot produce that from outside. Streaming intermediate targets
+over I2C was tried (2026-10-21) and rejected: at 100 Hz the fader sees a
+staircase of short moves, each one a soft start and a brake, and the result is
+a shudder, not a curve. The shape has to come from inside the control tick,
+which is where `move_brake.h` puts it.
+
+### The first design, and why it was replaced
+
+The first smooth profile (`move_profile.h`, still in the tree with its tests
+until it is retired) was a velocity triangle: the reference started at the
+Stribeck floor, rose at `a = 4d/T^2` and fell at the same rate so that it was
+back at the floor at the deadband's edge, with the braking decision taken
+every tick from the measured error. In simulation it was everything the
+Automatone does. On the bench (2026-11-07, board 0, `T` = 500 and 1000 ms)
+it was not: the carriage followed the falling reference with a large,
+unit-dependent lag, reached the deadband at 1500-4000 counts/s, overshot by
+16 counts and bounced. The reason is in the velocity loop: its feedforward
+`breakaway + v_ref/k` keeps driving forward while only `kv (v_ref - v)`,
+at 0.04 duty per count/s, pulls the carriage down toward a falling
+reference, and in the drive range between zero and the duty that sustains
+the speed the plant decelerates at only 10-15k counts/s^2 (it coasts; it
+does not brake). The fast profile is clean for the opposite reason: its
+collapsing reference makes a velocity error of thousands of counts/s, the
+drive goes negative, and the motor brakes at 300-500k counts/s^2. The bridge
+brake in the deadband stops an arrival under about 1400 counts/s inside the
+8-count window; above that the carriage runs out and comes back from the
+floor. And the move was uniformly slow: a 1000 ms `T` was needed for a clean
+end, and the operator wants a fast move that decelerates only at the end.
+
+### Cruise and brake
+
+The profile in force keeps the cascade from "The control law" and replaces
+only its first line, the position loop:
+
+```
+aim (move start, retarget, reversal):
+    cruising
+each tick, outside the deadband:
+    distance = |error| - deadband - RUN_IN              # counts left to the run-in
+    cruising:
+        v_ref = cap (the speed byte, else VEL_CAP)      # the fast profile's take-off
+        if distance * 2000 <= (max(v, v_min) + v_min) * T_b:
+            braking, a = (v^2 - v_min^2) / (2 distance)  # from the measured speed v
+    braking:
+        v_ref = sqrt(v_min^2 + 2 a distance)             # on the measured error
+        kv doubled
+    |v_ref| clamped to the speed limit, floored at v_min, toward the target
+```
+
+- **The take-off is the fast profile's.** While cruising the reference is the
+  cap, so the velocity loop is saturated and the drive is whatever the
+  take-up ceiling and `MOVE_MAX_DUTY` allow, exactly as in firmware 1.8;
+  the carriage reaches its top speed (about 8000 counts/s on the bench) as
+  quickly as it can. The profile plans nothing here, which is why it costs
+  no flash to speak of and why a fast and a smooth move start the same.
+- **The brake is decided by time and distance from the measured speed.**
+  `T_b`, the brake time (`REG_MOVE_PROFILE`'s ms, 120 by default), is how
+  long the reference takes from the speed the carriage has down to the
+  floor. A reference falling at a constant rate from `v` to `v_min` in
+  `T_b` covers `(v + v_min)/2 * T_b` counts, so the brake starts when that
+  is what is left to the run-in. From 8000 counts/s at 120 ms that is 513
+  counts, about half of full travel; a carriage under the floor (at rest,
+  moving away) is braked for as one at the floor, so a move shorter than
+  about 90 counts never leaves the floor and simply crawls.
+- **The curve is on the error, not on a clock.** From the entry on, the
+  reference each tick is `sqrt(v_min^2 + 2 a (|error| - deadband - RUN_IN))`
+  for the error measured that tick, with `a` fixed at entry from the speed
+  and the distance. A plant that lags the reference finds the curve lower
+  than its speed and is pulled down harder; a hand that slows the carriage
+  finds it higher. The curve reaches `v_min` at the run-in
+  (`MOVE_BRAKE_RUN_IN`, 24 counts before the deadband) and stays there, so
+  the carriage settles on its floor equilibrium (the speed at which the
+  floor's feedforward over-drive balances friction, about 1000-1400 counts/s
+  on board 0) before the deadband, where the bridge brake takes over as
+  before.
+- **The velocity gain is doubled while braking** (`MOVE_BRAKE_KV_SHIFT`,
+  smooth moves only; `move_drive()` takes the gain as an argument). Against
+  the floor's over-drive this halves the lag the carriage keeps behind a
+  falling reference, so it arrives under what the bridge brake can absorb.
+  The fast profile and the haptics run the law's gain.
+- **Retargets re-plan.** Any new aim starts by cruising and lets the next
+  tick decide: a farther target while braking cruises again, a nearer one
+  set late brakes at once from the speed the carriage has, on a curve
+  continuous with that speed (the deceleration is clamped at
+  `MOVE_BRAKE_ACCEL_MAX`; one it cannot meet leaves the curve under the
+  speed, and the loop brakes as hard as it can). A reversal is a fresh
+  cruise with the take-up ceiling re-armed, as before.
+- **Wrong-way references are the floor back.** If the error changes sign
+  without a new aim (an overshoot past the deadband), the reference is the
+  floor toward the target, braking, never a new cruise.
+
+Everything else is as before: the velocity loop, the feedforward, the
+stiction ramp, the take-up ceiling, the brake in the deadband, the settle
+timer, the movement timeout and `MODE_ERROR`, the stall escape. The speed byte
+of `LAYER_TARGET` still caps the reference, in the cruise and on the curve.
+Haptics use `move_vref` directly and are not touched.
+
+### Fast and smooth, and the brake time
+
+`REG_MOVE_PROFILE` (0x15, `i2c_data.h`) selects the profile and the brake time
+at runtime, per fader, with no per-flash configuration:
+
+- `MOVE_PROFILE_SMOOTH` (1, the default from reset) with a brake time `T_b`
+  of `MOVE_PROFILE_TIME_MIN_MS` (50) to `MOVE_PROFILE_TIME_MAX_MS` (2000)
+  ms, `MOVE_BRAKE_TIME_DEFAULT_MS` (120) by default;
+- `MOVE_PROFILE_FAST` (0): the move of firmware up to 1.8, the ms ignored.
+
+The ms was the whole move's time in the first design; in this one it is the
+brake's, and a longer value starts the brake earlier and makes it gentler
+without slowing the cruise. (`MOVE_PROFILE_TIME_DEFAULT_MS`, 240, is the
+first design's default and stays in `i2c_data.h` for `test_move_profile`;
+the firmware starts at `MOVE_BRAKE_TIME_DEFAULT_MS`.)
+
+A write takes effect at the next move: a write during a move is kept until
+that move ends (a later write replaces it), so a move finishes under the
+profile it started with, and a read until then shows the profile in force.
+The setting is not stored, so a host that wants fast moves, or another brake
+time, writes the register after every fader reset, gated on
+`FW_VERSION_MOVE_PROFILE`. The host needs nothing for the default.
+
+### What the bench and the simulation say
+
+Bench, 2026-11-07, board 0 at the default (the same build on all eight
+boards since): full travel about 0.5 s including the 300 ms settle, so about
+0.2 s of motion; overshoot 2-5 counts, one down move 18; no bounce; the
+operator's verdict was that it is right. Measured again against the
+Automatone's numbers it is a fast move with a soft end, not an S-curve: the
+take-off is firmware 1.8's.
+
+`test_move_brake` runs the whole loop (the filters, the plan, the drive with
+the raised gain, the take-up ceiling, the brake) against the first-order
+model of the reference plant from "The plant" (`k` 29, breakaway 68/86,
+coast tau 5 ms) at the 2 kHz tick. The model tops out at 5400 counts/s where
+the bench reaches 8000, and it brakes as readily as it accelerates, so its
+times are longer and its ends cleaner than a fader's:
+
+| move, T_b = 120 ms | arrival | 10-90 % | brake from | overshoot | arrival speed |
+|---|---|---|---|---|---|
+| full travel up (1023 counts) | 325 ms | 185 ms | 158 ms | 0 | 555 |
+| full travel down | 347 ms | 198 ms | 181 ms | 0 | 557 |
+| half (512) | 240 ms | 144 ms | 74 ms | 0 | 557 |
+| quarter (256) | 194 ms | 143 ms | 28 ms | 0 | 554 |
+| 80 counts (brake only) | 129 ms | 116 ms | 0 | 0 | 555 |
+| 40 counts (floor crawl) | 57 ms | - | 0 | 0 | 555 |
+| full travel, T_b = 50 / 400 ms | 294 / 511 ms | 167 / 337 ms | 197 / 62 ms | 0 | 559 / 555 |
+| speed byte at 2000 counts/s | 591 ms | 416 ms | 424 ms | 0 | 552 |
+| retarget 500 -> 900 at 150 ms (farther, while braking) | 339 ms | - | 72 ms | 0 | 556 |
+| retarget 1000 -> 450 at 120 ms (nearer, late) | 124 ms | - | 120 ms | 0 | 448 |
+| reversal 1000 -> 0 at 150 ms | 419 ms | - | 253 ms | 0 | 553 |
+
+### Bench tuning
+
+What to try on the fader, in this order:
+
+1. **The brake time** is the one knob. Write `0x15` as `[1, ms >> 8, ms & 0xFF]`
+   (240 is `[1, 0x00, 0xF0]`). Longer starts the brake earlier and lands
+   slower; shorter arrives faster and, past the point where the carriage
+   cannot shed its speed in the distance, overshoots. 120 ms was accepted
+   on board 0.
+2. **Fast for comparison**: `[0, 0, 0]` on the same fader, same move. That is
+   exactly firmware 1.8's move; the start should look the same.
+3. **Watch the end** for the three shapes: a bounce (the carriage runs past
+   the deadband and comes back) is an arrival faster than the bridge brake
+   absorbs, so a longer brake time or a larger `MOVE_BRAKE_RUN_IN`; a ring
+   in the tail (the carriage hunting around the curve) is the doubled gain,
+   `MOVE_BRAKE_KV_SHIFT` 0; a creep (the last millimetre at the floor) is
+   the run-in or the brake time too long for that unit.
+4. **Watch the start** only if it differs from fast mode's: it is the same
+   code path, and a hesitation there is breakaway and the stiction ramp, not
+   the profile.
+5. **The speed byte** still works and is still unitless: it caps the cruise
+   and the curve, and a limited move has the same end.
+6. **Retargets**: a farther target during the brake cruises again (a second
+   take-off, by design); a nearer one set late brakes at once. **A profile
+   or brake time written mid-move** changes nothing until that move ends.
+
+The per-unit part is the floor equilibrium: the speed a unit settles at
+under the floor's feedforward depends on its friction, and the bridge
+brake's reach on its mass. Characterisation (`motor_cal.cpp`) sets the
+floor and the feedforward; the brake time is the host's to set per unit if
+one needs it. Nothing is stored.
+
+### Implementation notes
+
+The plan is integer and written for the ATtiny's flash (`move_brake.h`,
+"Fixed point" below for the rest of the loop): the brake's deceleration is
+16 bits in sixteenths of a count/s^2, the curve is worked out in units of 16
+counts/s (the floor, 560, is 35 such units exactly) so that its root is
+16-bit and one Newton step a tick, descending from the previous tick's value,
+finds it (two 32-bit divisions per move, at the entry and on each tick of
+the curve; `avr-libc`'s is already linked for the ramps). The entry test and
+the curve's radicand are one 32-bit product each. The whole profile,
+including the gain argument of `move_drive()`, costs the same flash as the
+first design it replaced: `fb_app_only` is at 14808 B of 14846 with either.
+
+| constant | value | effect |
+|---|---|---|
+| `MOVE_BRAKE_TIME_DEFAULT_MS` | 120 | The brake time from reset. Full travel lands near 0.25 s on the bench. |
+| `MOVE_PROFILE_TIME_MIN/MAX_MS` | 50 / 2000 | What a host may write; clamped. |
+| `MOVE_BRAKE_RUN_IN` | 24 | Counts before the deadband at which the curve reaches the floor; where the carriage settles to its floor equilibrium. |
+| `MOVE_BRAKE_KV_SHIFT` | 1 | The velocity gain is shifted up by this while braking (within `MOVE_BRAKE_KV_MAX_Q16`, 16383, what the loop keeps in 32 bits). 0 turns it off. |
+| `MOVE_BRAKE_ACCEL_MAX` | 524288 | Clamp on the deceleration; a nearer retarget set too late to meet reaches it and brakes as hard as the loop can. Keeps the curve's product in 32 bits. |
+| `MOVE_BRAKE_VEL_CAP` | 16000 | The cruising reference when the speed byte sets none, twice the plant's reach, so the loop saturates as the fast profile's does. |
+| `MOVE_PROFILE_TIME_DEFAULT_MS` | 240 | The first design's default; unused by the firmware, kept for `test_move_profile`. |
 
 ## Haptics
 
@@ -375,6 +599,7 @@ now land on whole numbers and KV on Q16.
 | `MOVE_SPEED_SLOWEST_MS` | 700 | Full-travel time at host speed 0. The slow end of the validated window. |
 | `MOVE_SPEED_FASTEST_MS` | 250 | Full-travel time at host speed 254. Faster than this the limiter stops biting. |
 | `MOVE_TIMEOUT_TOLERANCE` | 20 | On timeout, error below this goes idle instead of `MODE_ERROR`. |
+| `MOVE_BRAKE_*`, `MOVE_PROFILE_*` | see "Smooth motion" | The smooth profile's brake time, run-in, gain shift and clamps. `MOVE_VREF_SLOPE` governs the fast profile only. |
 
 **The mechanism sets the minimum deadband.** Nothing moves
 below breakaway, and at breakaway speed jumps straight to `v_jump`, so the
@@ -563,6 +788,16 @@ above) took the `fb_app_only` application from 14822 to 13696 bytes (the
 limit is 14846) with no soft-float symbol left in either build; the
 self-calibration's 0.995 span buffer went to per-mille integer arithmetic in
 the same step, as it was the one other `double`.
+
+The smooth profile (firmware 1.9) spent most of that again: the plan,
+`REG_MOVE_PROFILE` and the second reference path together are about 1000 B,
+and `fb_app_only` is at 14808 B of 14846. The first design's first version,
+in signed Q8 with 32-bit products and the measured tick, did not fit by
+290 B; the cruise-and-brake design that replaced it was 114 B over on its
+first build and fits at the same 14808 B after dropping redundant clamps
+and a second Newton division. **38 B are left.** A planner re-seeded from
+the measured velocity at a mid-move `REG_MOVE_PROFILE` write (about 300 B)
+was the first thing the budget refused.
 
 If a future change does not fit, measure before trimming: build, then
 `avr-nm -S --size-sort -C .pio/build/fb_app_only/firmware.elf | tail -20`
