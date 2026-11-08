@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (9)
+#define FW_VERSION_MINOR (10)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -93,6 +93,11 @@
 // implements REG_MOVE_PROFILE. Older firmware moves as MOVE_PROFILE_FAST and
 // ignores the register; no protocol-version bump.
 #define FW_VERSION_MOVE_PROFILE (0x0109)  // 1.9
+
+// Minimum firmware version that runs the AVR watchdog and implements
+// REG_RESET_CAUSE. Older firmware reads back 0xFF bytes; no protocol-version
+// bump.
+#define FW_VERSION_RESET_CAUSE (0x010A)  // 1.10
 
 
 /*
@@ -145,7 +150,9 @@
  * -----|---------------------|---------|------|------------
  * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + brake time in ms (see below; FW 1.9+)
  * -----|---------------------|---------|------|------------
- * 0x16 | ...                 |         |      | (free - next production register goes here)
+ * 0x16 | RESET_CAUSE         | R       |u8[2] | Why the app last started + unexpected restarts (see below; FW 1.10+)
+ * -----|---------------------|---------|------|------------
+ * 0x17 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -200,6 +207,35 @@
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
 #define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
 #define REG_MOVE_PROFILE 0x15  // Move profile: mode + brake time (R/W, u8 + u16 big-endian, see below)
+#define REG_RESET_CAUSE 0x16  // Why the app last started + unexpected restart count (R, u8[2], see below)
+
+/*
+ * REG_RESET_CAUSE (0x16) - read-only, 2 bytes, FW 1.10+.
+ *
+ * [cause, restarts]. The application runs a hardware watchdog (about 1 s):
+ * a board whose main loop stops, or whose I2C interface holds the clock
+ * low, resets itself instead of holding the shared bus. This register
+ * lets a host see that it happened.
+ *
+ * cause     RESET_CAUSE_COLD: power-up (or nothing usable in RAM).
+ *           RESET_CAUSE_HANDOFF: the application left on purpose, through
+ *           REG_ENTER_BOOTLOADER, and the same image started again.
+ *           RESET_CAUSE_UNEXPECTED: the application was running and started
+ *           again with no handoff - the watchdog, or another warm reset
+ *           (brown-out with the RAM kept, a crash to the reset vector, a
+ *           UPDI reset after flashing).
+ * restarts  RESET_CAUSE_UNEXPECTED starts since the last cold start,
+ *           saturating at 255. A host that sees it grow knows the board
+ *           restarted on its own, even when it missed the moment.
+ *
+ * Not the hardware reset flags: the I2C bootloader reads and clears RSTFR
+ * before the application starts, so the application keeps its own record in
+ * RAM that a warm reset keeps (firmware/src/reset_record.h). Firmware
+ * without this register reads back 0xFF bytes (see FW_VERSION_NONE).
+ */
+#define RESET_CAUSE_COLD (0)
+#define RESET_CAUSE_HANDOFF (1)
+#define RESET_CAUSE_UNEXPECTED (2)
 
 /*
  * REG_MOVE_PROFILE (0x15) - read/write, 3 bytes, FW 1.9+.

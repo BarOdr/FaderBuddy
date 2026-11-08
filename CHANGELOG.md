@@ -49,6 +49,39 @@ for production purposes.
 
 ### Unreleased
 
+- **Firmware 1.10: hardware watchdog and reset cause.** The application now
+  runs under the AVR watchdog (about 1.0 s, `WDT_PERIOD_1KCLK_gc`), enabled at
+  the end of `setup()` and fed only at the end of a healthy `loop()` pass. The
+  longest legitimate pass (the 17-byte calibration EEPROM write at the end of
+  self-calibration, under 100 ms) is far inside it. The watchdog fuse stays 0,
+  so every reset (including the software reset into the I2C bootloader) turns
+  the watchdog off: the bootloader never runs under it and cannot reset-loop;
+  after an update the bootloader jumps to the application, which enables it
+  again. The loop also stops feeding the watchdog when the I2C bus (PB0/PB1)
+  has not been idle (both lines high) for 100 ms, so a board left holding SDA
+  or SCL low resets itself and releases the bus; every board that sees the
+  held bus resets too. After a watchdog reset the motor coasts (TCA0 compares
+  0, INPUT_IDLE), calibration loads from EEPROM, touch recalibrates, and the
+  host must resend its configuration (layers, speed, haptics, profile).
+- **`REG_RESET_CAUSE` (0x16, R, 2 bytes):** `[cause, restarts]`, cause 0 cold
+  start, 1 handoff from the bootloader (after `REG_ENTER_BOOTLOADER`), 2
+  unexpected restart (watchdog, or any reset without a handoff: a UPDI flash
+  or a brown-out with RAM kept also shows as 2); restarts counts unexpected
+  starts since the last cold one, saturating at 255. Kept in `.noinit` RAM
+  because the bootloader clears `RSTCTRL.RSTFR` before the application runs. The
+  record's `.noinit` section is pinned at 0x3C00 for every application build,
+  so it does not move between versions. `restarts` never resets until power
+  is cut: hosts should act on a change, not on the value.
+- The watchdog is fed only while interrupts are globally on, so a loop left
+  running with interrupts off (frozen `millis()`, TWI never served) still
+  resets. The feed rule lives in `firmware/src/wdt_feed.h` with host tests.
+- The watchdog relies on `FUSE.WDTCFG` = 0 (documented in
+  ABOUT_I2C_BOOTLOADER.md); never set that fuse.
+- Removed the dead `Wire.available()` drain loops in `onI2cReceive`
+  (megaTinyCore empties the buffer at every START and STOP); 86 bytes freed.
+- `esphome/components/fader_buddy/i2c_data.h` re-synced with the canonical
+  header (it had drifted in comments).
+
 - **Firmware 1.9: smooth motion.** A remote move takes off and cruises
   exactly as before (full drive, the quickest the mechanism moves) and
   decelerates only at the end: a brake planned inside the control loop from
