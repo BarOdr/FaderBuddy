@@ -40,10 +40,19 @@ struct ResetRecord {
 // Called once at start, before anything else uses the record: classifies
 // this start from what the previous run left and marks the record running.
 static inline void reset_record_boot(ResetRecord &r) {
-  (void)r;
+  if (r.marker == RESET_RECORD_RUNNING) {
+    r.cause = RESET_CAUSE_UNEXPECTED;
+    if (r.restarts != 0xFF) r.restarts++;
+  } else if (r.marker == RESET_RECORD_HANDOFF) {
+    r.cause = RESET_CAUSE_HANDOFF;
+  } else {
+    r.cause = RESET_CAUSE_COLD;
+    r.restarts = 0;
+  }
+  r.marker = RESET_RECORD_RUNNING;
 }
 
 // Called just before the application resets itself on purpose.
 static inline void reset_record_handoff(ResetRecord &r) {
-  (void)r;
+  r.marker = RESET_RECORD_HANDOFF;
 }
