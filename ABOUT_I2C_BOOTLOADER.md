@@ -208,6 +208,58 @@ effectively impossible. After a power-on reset, RAM is indeterminate, but that
 path has neither `SWRF` set nor a valid token, so it correctly falls through to
 the application.
 
+### The application's watchdog (firmware 1.10+)
+
+The application runs under the AVR hardware watchdog, about 1.0 s
+(`WDT_PERIOD_1KCLK_gc`). It is turned on as the last step of `setup()`. Each
+`loop()` pass feeds it only when interrupts are on and the fader bus has been
+idle (SDA and SCL both high) within the last 100 ms (`firmware/src/wdt_feed.h`).
+A hung board, or a bus held low for about 1.1 s, therefore resets the board.
+Every board that sees the held bus resets, not only the one holding it.
+
+**Fuse assumption: `FUSE.WDTCFG` must stay 0.** Every reset reloads
+`WDT.CTRLA` from that fuse, so with 0 every reset turns the watchdog off:
+
+- the software reset into the bootloader;
+- the watchdog reset itself.
+
+That is what keeps the resident bootloader, which never feeds the watchdog,
+from reset-looping. After an update the bootloader jumps to the application
+without a reset, and `setup()` turns the watchdog on again.
+`firmware/tools/flash_with_fuses.py` writes only APPEND and BOOTEND. **Never set
+WDTCFG**: a non-zero value would reset a resident bootloader every period.
+
+**`REG_RESET_CAUSE` (0x16, read, 2 bytes): `[cause, restarts]`.**
+
+| `cause` | Meaning |
+|---|---|
+| 0 | Cold start (power-up) |
+| 1 | Handoff: the bootloader started the application after `REG_ENTER_BOOTLOADER` |
+| 2 | Unexpected: the watchdog, or any other reset without a handoff |
+
+A UPDI flash, or a brown-out that keeps RAM, also reads as 2.
+
+- `restarts` counts the unexpected starts since the last cold start. It
+  **saturates at 255** and the host cannot clear it.
+- A host should compare it with the last value it read and act on a change
+  (a delta), not on the absolute value. After a long session `02 nn` is
+  history, not a live fault.
+- The record lives in `.noinit` RAM, which `platformio.ini` pins at 0x3C00 for
+  every application build, so it keeps its address across firmware versions.
+- The application cannot use `RSTCTRL.RSTFR`, because the bootloader clears
+  it first.
+
+**After a watchdog reset the host must resend its configuration.** The motor
+coasts and the mode is INPUT_IDLE, so nothing moves until the host writes a
+target. Calibration loads from EEPROM, and touch recalibrates to whatever is on
+the cap at that moment. Everything held only in RAM goes back to its defaults:
+
+- layers and their positions;
+- speed;
+- haptics and notches;
+- the idle duration;
+- the move profile.
+
 ### Forced entry with the TP5 strap
 
 `REG_ENTER_BOOTLOADER` only works if the application runs and answers the bus.

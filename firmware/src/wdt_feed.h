@@ -27,8 +27,9 @@
 // `idle_ms` keeps when the bus was last seen idle; `lines_idle` is this
 // pass's sample of both lines high; `irq_on` is SREG's I flag.
 static inline bool wdt_may_feed(uint16_t now, uint16_t &idle_ms, bool lines_idle, bool irq_on) {
-  // RED: the rule main.cpp runs in 1.10's first cut, without the I flag.
-  (void)irq_on;
+  // First, and without touching idle_ms: the clock is frozen then anyway, and
+  // this order is 26 bytes smaller on the ATtiny than testing it last.
+  if (!irq_on) return false;
   if (lines_idle) idle_ms = now;
   return (uint16_t)(now - idle_ms) < WDT_BUS_STUCK_MS;
 }

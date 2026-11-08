@@ -29,6 +29,7 @@
 #include "haptic_engage.h"
 #include "haptic_notch.h"
 #include "reset_record.h"
+#include "wdt_feed.h"
 
 // App metadata footer for the I2C bootloader host (see BL_APP_META_ADDR):
 // the two bytes at the fixed end-of-flash address, always equal to the same
@@ -42,8 +43,10 @@ const uint8_t FW_VERSION_FOOTER[2] = {
 };
 
 // Why this start happened, for REG_RESET_CAUSE (reset_record.h). In .noinit,
-// so a warm reset - the watchdog above all - leaves it for the next start;
-// the bootloader's RAM ends far below it and its stack far above.
+// so a warm reset - the watchdog above all - leaves it for the next start.
+// platformio.ini pins .noinit at 0x3C00 for every app build, so the record
+// does not move between firmware versions; the bootloader's RAM ends far
+// below it and its stack far above.
 __attribute__((section(".noinit"))) ResetRecord reset_record;
 
 // Hardware watchdog (WDT, clocked from the 32 kHz ULP oscillator, so it
@@ -56,12 +59,10 @@ __attribute__((section(".noinit"))) ResetRecord reset_record;
 // under it and cannot reset-loop, and setup() turns it on again.
 #define WDT_PERIOD WDT_PERIOD_1KCLK_gc
 
-// The fader bus lines on VPORTB (TWI0 default pins: PB0 SCL, PB1 SDA), and
-// how long both may stay anything but idle before the board stops feeding the
-// watchdog (loop() below). A held bus thus resets the board after
-// BUS_STUCK_MS plus one watchdog period, about 1.1 s.
+// The fader bus lines on VPORTB (TWI0 default pins: PB0 SCL, PB1 SDA). A held
+// bus resets the board after WDT_BUS_STUCK_MS plus one watchdog period, about
+// 1.1 s (wdt_feed.h, loop() below).
 #define I2C_LINES_bm ((1 << 0) | (1 << 1))
-#define BUS_STUCK_MS (100)
 uint16_t bus_idle_ms = 0;  // low 16 bits of millis() when the bus was last idle
 
 #define PIN_LED (PIN_PB2)
@@ -1674,21 +1675,14 @@ void loop() {
     VPORTB.OUT &= ~LED_bm;
   }
 
-  // Feed the watchdog once per healthy pass. Reaching here means the loop
-  // runs; the shared fader bus must also have been idle (SDA and SCL both
-  // high) at some pass in the last BUS_STUCK_MS. Traffic leaves both lines
-  // high between bits and between transfers far more often than that, so a
-  // bus with neither line released for that long is held: by this board's
-  // TWI stretching the clock with its interrupt never served, or by a slave
-  // transmitter left driving SDA low when the host gave up mid-read - the
-  // second with the CPU running normally, which a loop-only watchdog would
-  // never catch. Every board on the bus sees a held bus the same way, so all
-  // of them reset, the one holding it among them; that releases the bus,
-  // and the others only lose their RAM state, which the host already lost
-  // with the bus.
-  uint16_t now16 = (uint16_t)millis();
-  if ((VPORTB.IN & I2C_LINES_bm) == I2C_LINES_bm) bus_idle_ms = now16;
-  if ((uint16_t)(now16 - bus_idle_ms) < BUS_STUCK_MS) __builtin_avr_wdr();
+  // Feed the watchdog once per healthy pass: the loop runs, interrupts are
+  // on, and the shared fader bus was idle within WDT_BUS_STUCK_MS (the rule
+  // and its reasons: wdt_feed.h). Every board on the bus sees a held bus the
+  // same way, so all of them reset, the one holding it among them; that
+  // releases the bus, and the others only lose their RAM state, which the
+  // host already lost with the bus.
+  if (wdt_may_feed((uint16_t)millis(), bus_idle_ms, (VPORTB.IN & I2C_LINES_bm) == I2C_LINES_bm, SREG & CPU_I_bm))
+    __builtin_avr_wdr();
 }
 
 // One path for every change of the effective touch, sensed or injected, so the

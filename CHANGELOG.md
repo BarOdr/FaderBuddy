@@ -68,7 +68,15 @@ for production purposes.
   unexpected restart (watchdog, or any reset without a handoff: a UPDI flash
   or a brown-out with RAM kept also shows as 2); restarts counts unexpected
   starts since the last cold one, saturating at 255. Kept in `.noinit` RAM
-  because the bootloader clears `RSTCTRL.RSTFR` before the application runs.
+  because the bootloader clears `RSTCTRL.RSTFR` before the application runs. The
+  record's `.noinit` section is pinned at 0x3C00 for every application build,
+  so it does not move between versions. `restarts` never resets until power
+  is cut: hosts should act on a change, not on the value.
+- The watchdog is fed only while interrupts are globally on, so a loop left
+  running with interrupts off (frozen `millis()`, TWI never served) still
+  resets. The feed rule lives in `firmware/src/wdt_feed.h` with host tests.
+- The watchdog relies on `FUSE.WDTCFG` = 0 (documented in
+  ABOUT_I2C_BOOTLOADER.md); never set that fuse.
 - Removed the dead `Wire.available()` drain loops in `onI2cReceive`
   (megaTinyCore empties the buffer at every START and STOP); 86 bytes freed.
 - `esphome/components/fader_buddy/i2c_data.h` re-synced with the canonical

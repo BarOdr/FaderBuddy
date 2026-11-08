@@ -237,6 +237,8 @@ fader position for that layer, and will apply that layer's haptic configuration.
 
 See [ABOUT_LAYERS.md](ABOUT_LAYERS.md) for more about layers and the I2C protocol.
 
+Since firmware 1.10 a hardware watchdog resets a board that hangs, or that sees the I2C bus held for about 1 s. `REG_RESET_CAUSE` reports why the board last started. After such a reset the host must send its configuration again (layers, speed, haptics, idle duration, move profile). See [ABOUT_I2C_BOOTLOADER.md](ABOUT_I2C_BOOTLOADER.md), "The application's watchdog".
+
 ## Additional Documentation
 This README covers the basics, but there are a number of additional pages with more detailed documentation:
 
