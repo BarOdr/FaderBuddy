@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (9)
+#define FW_VERSION_MINOR (10)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -93,6 +93,11 @@
 // implements REG_MOVE_PROFILE. Older firmware moves as MOVE_PROFILE_FAST and
 // ignores the register; no protocol-version bump.
 #define FW_VERSION_MOVE_PROFILE (0x0109)  // 1.9
+
+// Minimum firmware version that runs the AVR watchdog and implements
+// REG_RESET_CAUSE. Older firmware reads back 0xFF bytes; no protocol-version
+// bump.
+#define FW_VERSION_RESET_CAUSE (0x010A)  // 1.10
 
 
 /*
@@ -143,9 +148,11 @@
  * -----|---------------------|---------|------|------------
  * 0x14 | LAYER_NOTCHES       | R/W     |u8[4] | Placed notch positions (layer-addressed, see below; FW 1.8+)
  * -----|---------------------|---------|------|------------
- * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + move time in ms (see below; FW 1.9+)
+ * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + brake time in ms (see below; FW 1.9+)
  * -----|---------------------|---------|------|------------
- * 0x16 | ...                 |         |      | (free - next production register goes here)
+ * 0x16 | RESET_CAUSE         | R       |u8[2] | Why the app last started + unexpected restarts (see below; FW 1.10+)
+ * -----|---------------------|---------|------|------------
+ * 0x17 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
  * 0xF0 | DEBUG_DRIVE         | W       | u8[2]| Open-loop motor drive (DEBUG_DRIVE builds only)
  * -----|---------------------|---------|------|------------
@@ -199,7 +206,36 @@
 #define REG_MOTOR_CAL 0x12  // Measured motor characteristics (R, 12 bytes, see below)
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
 #define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
-#define REG_MOVE_PROFILE 0x15  // Move profile: mode + move time (R/W, u8 + u16 big-endian, see below)
+#define REG_MOVE_PROFILE 0x15  // Move profile: mode + brake time (R/W, u8 + u16 big-endian, see below)
+#define REG_RESET_CAUSE 0x16  // Why the app last started + unexpected restart count (R, u8[2], see below)
+
+/*
+ * REG_RESET_CAUSE (0x16) - read-only, 2 bytes, FW 1.10+.
+ *
+ * [cause, restarts]. The application runs a hardware watchdog (about 1 s):
+ * a board whose main loop stops, or whose I2C interface holds the clock
+ * low, resets itself instead of holding the shared bus. This register
+ * lets a host see that it happened.
+ *
+ * cause     RESET_CAUSE_COLD: power-up (or nothing usable in RAM).
+ *           RESET_CAUSE_HANDOFF: the application left on purpose, through
+ *           REG_ENTER_BOOTLOADER, and the same image started again.
+ *           RESET_CAUSE_UNEXPECTED: the application was running and started
+ *           again with no handoff - the watchdog, or another warm reset
+ *           (brown-out with the RAM kept, a crash to the reset vector, a
+ *           UPDI reset after flashing).
+ * restarts  RESET_CAUSE_UNEXPECTED starts since the last cold start,
+ *           saturating at 255. A host that sees it grow knows the board
+ *           restarted on its own, even when it missed the moment.
+ *
+ * Not the hardware reset flags: the I2C bootloader reads and clears RSTFR
+ * before the application starts, so the application keeps its own record in
+ * RAM that a warm reset keeps (firmware/src/reset_record.h). Firmware
+ * without this register reads back 0xFF bytes (see FW_VERSION_NONE).
+ */
+#define RESET_CAUSE_COLD (0)
+#define RESET_CAUSE_HANDOFF (1)
+#define RESET_CAUSE_UNEXPECTED (2)
 
 /*
  * REG_MOVE_PROFILE (0x15) - read/write, 3 bytes, FW 1.9+.
@@ -211,27 +247,34 @@
  * ends (a later write replaces it), so the move finishes under the profile
  * it started with; a read until then shows the profile in force.
  *
- * mode  MOVE_PROFILE_SMOOTH (default): the fader eases out of rest, peaks
- *       mid-travel and eases into the target, like a motorised fader on a
- *       studio desk. A move takes about `time` ms whatever its distance,
- *       down to the shortest move the mechanism can make smoothly (a few
- *       millimetres; shorter moves are quicker) and up to what the motor
- *       can do (a full-travel move may take a little longer).
+ * mode  MOVE_PROFILE_SMOOTH (default): the fader moves as fast as it can,
+ *       as MOVE_PROFILE_FAST does, and decelerates over the last part of
+ *       the travel into the target, without overshoot. The brake is planned
+ *       from the speed the fader has, so a short move that never reaches
+ *       speed is simply quick.
  *       MOVE_PROFILE_FAST: the move of firmware up to 1.8, full drive from
  *       the first tick and an exponential approach to the target; the
  *       quickest the mechanism moves. `time` is ignored. A write with any
  *       other mode value is ignored.
- * time  the smooth move's time, ms, MOVE_PROFILE_TIME_MIN_MS to
- *       MOVE_PROFILE_TIME_MAX_MS; a write outside is clamped. 240 by default.
+ * time  the smooth move's brake time, ms: how long the deceleration takes
+ *       from the speed the fader has down to its slowest speed. Longer
+ *       starts the brake earlier and lands more gently; it does not slow
+ *       the rest of the move. MOVE_PROFILE_TIME_MIN_MS to
+ *       MOVE_PROFILE_TIME_MAX_MS; a write outside is clamped. 120 by
+ *       default (MOVE_BRAKE_TIME_DEFAULT_MS in firmware/src/move_brake.h;
+ *       MOVE_PROFILE_TIME_DEFAULT_MS below was the first design's default
+ *       and is not what the firmware starts at).
  *
  * In both modes the REG_LAYER_TARGET speed byte still caps the speed of the
- * move. Not stored: every reset starts at MOVE_PROFILE_SMOOTH and
- * MOVE_PROFILE_TIME_DEFAULT_MS, so a host that wants another setting writes
- * it again after the fader resets. Firmware without this register moves as
+ * move. Not stored: every reset starts at MOVE_PROFILE_SMOOTH and the
+ * default brake time, so a host that wants another setting writes it again
+ * after the fader resets. Firmware without this register moves as
  * MOVE_PROFILE_FAST and reads back 0xFF bytes (see FW_VERSION_NONE).
  */
 #define MOVE_PROFILE_FAST (0)
 #define MOVE_PROFILE_SMOOTH (1)
+// The first design's default move time; the firmware starts at
+// MOVE_BRAKE_TIME_DEFAULT_MS (move_brake.h), kept here for test_move_profile.
 #define MOVE_PROFILE_TIME_DEFAULT_MS (240)
 #define MOVE_PROFILE_TIME_MIN_MS (50)
 #define MOVE_PROFILE_TIME_MAX_MS (2000)
@@ -241,7 +284,7 @@ static inline bool move_profile_mode_valid(uint8_t mode) {
   return mode == MOVE_PROFILE_FAST || mode == MOVE_PROFILE_SMOOTH;
 }
 
-// The move time a REG_MOVE_PROFILE write of these two bytes selects.
+// The brake time a REG_MOVE_PROFILE write of these two bytes selects.
 static inline uint16_t move_profile_time_from_wire(uint8_t high, uint8_t low) {
   uint16_t ms = (uint16_t)(((uint16_t)high << 8) | low);
   if (ms < MOVE_PROFILE_TIME_MIN_MS) return MOVE_PROFILE_TIME_MIN_MS;

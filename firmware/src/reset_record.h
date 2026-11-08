@@ -1,0 +1,49 @@
+/*
+ * Reset record: why the application last started, for REG_RESET_CAUSE.
+ *
+ * Pure logic with no hardware access, so it runs in the native_test host
+ * tests. main.cpp owns one ResetRecord in .noinit RAM, which the C runtime
+ * does not clear and a warm reset (watchdog, software reset, brown-out with
+ * the supply held) keeps, and which a power-up leaves as noise.
+ *
+ * Why not RSTCTRL.RSTFR: the I2C bootloader owns the reset vector, reads the
+ * flags and writes them back to clear them before it jumps to the
+ * application, so the application never sees which reset it was. The
+ * bootloader is not field-updatable, so the application keeps its own record:
+ *
+ *   - while it runs, the marker says RESET_RECORD_RUNNING;
+ *   - when it leaves on purpose (REG_ENTER_BOOTLOADER), it writes
+ *     RESET_RECORD_HANDOFF just before the software reset;
+ *   - at the next start, RUNNING means it stopped without a handoff, which
+ *     with the watchdog on is almost always the watchdog.
+ *
+ * A power-up matches a 16-bit marker by chance about once in 65536 starts and
+ * is then reported as one unexpected restart; the restart count never
+ * survives a power-up otherwise.
+ */
+
+#pragma once
+
+#include <stdint.h>
+
+#include "shared/i2c_data.h"
+
+#define RESET_RECORD_RUNNING (0x5A17)  // the application is running
+#define RESET_RECORD_HANDOFF (0xB00F)  // it left on purpose, for the bootloader
+
+struct ResetRecord {
+  uint16_t marker;   // RESET_RECORD_*, or noise after a power-up
+  uint8_t cause;     // RESET_CAUSE_* of this start; REG_RESET_CAUSE byte 0
+  uint8_t restarts;  // unexpected starts since the last cold one; byte 1
+};
+
+// Called once at start, before anything else uses the record: classifies
+// this start from what the previous run left and marks the record running.
+static inline void reset_record_boot(ResetRecord &r) {
+  (void)r;
+}
+
+// Called just before the application resets itself on purpose.
+static inline void reset_record_handoff(ResetRecord &r) {
+  (void)r;
+}
