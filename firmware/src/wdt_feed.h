@@ -1,19 +1,30 @@
 /*
- * When loop() may feed the hardware watchdog (main.cpp), as pure logic so it
- * runs in the native_test host tests.
+ * Two rules loop() applies at the end of every pass (main.cpp), as pure logic
+ * so they run in the native_test host tests:
  *
- * A pass feeds only when both hold:
+ *   - wdt_may_feed: whether this pass feeds the hardware watchdog. Only a
+ *     CPU that is not healthy withholds the feed, and the one sign of that
+ *     loop() can test is interrupts globally off: millis() and the TWI
+ *     interrupt both need them, so a loop left running with I cleared sits
+ *     with a frozen clock and a TWI nobody serves, and must not keep the
+ *     board alive. The bus state plays no part since firmware 1.11: in 1.10
+ *     a held bus also withheld the feed, so every board on the bus reset
+ *     about 1 s later, recalibrated touch to whatever rested on its cap and
+ *     lost its RAM state, for a condition a healthy CPU can clear itself.
  *
- *   - interrupts are globally on. millis() and the TWI interrupt both need
- *     them: a loop left running with I cleared would see a frozen clock (so
- *     the held-bus time below never grows) while its TWI sits in CLKHOLD
- *     holding SCL low, and must not keep the board alive;
- *   - the shared fader bus has been idle (SDA and SCL both high) at some pass
- *     within the last WDT_BUS_STUCK_MS. Traffic leaves both lines high between
- *     bits and transfers far more often than that, so a bus with neither line
- *     released for that long is held: by this board's TWI stretching the
- *     clock, or by a slave transmitter left driving SDA low when the host gave
- *     up mid-read, with the CPU running normally.
+ *   - bus_release_due: whether this pass frees this board's TWI (main.cpp
+ *     twi_release(): the slave is disabled and enabled again, which drops
+ *     its hold on both lines and restarts its state machine). Due when the
+ *     shared fader bus has not been idle (SDA and SCL both high) at any pass
+ *     for WDT_BUS_STUCK_MS. Traffic leaves both lines high between bits and
+ *     transfers far more often than that, so a bus with neither line released
+ *     for that long is held: by this board's TWI stretching the clock, or by
+ *     a slave transmitter left driving SDA low when the host gave up
+ *     mid-read. Once per hold: after a release the bus must be seen idle
+ *     before another is due, so a line held by someone else (a shorted line,
+ *     a stuck host) is not "released" ten times a second and counted as ten
+ *     holds, and a hold longer than the 16-bit clock period cannot look like
+ *     a fresh one.
  *
  * Time is the low 16 bits of millis(); differences wrap correctly.
  */
@@ -24,12 +35,21 @@
 
 #define WDT_BUS_STUCK_MS (100)
 
-// `idle_ms` keeps when the bus was last seen idle; `lines_idle` is this
-// pass's sample of both lines high; `irq_on` is SREG's I flag.
-static inline bool wdt_may_feed(uint16_t now, uint16_t &idle_ms, bool lines_idle, bool irq_on) {
-  // First, and without touching idle_ms: the clock is frozen then anyway, and
-  // this order is 26 bytes smaller on the ATtiny than testing it last.
-  if (!irq_on) return false;
-  if (lines_idle) idle_ms = now;
-  return (uint16_t)(now - idle_ms) < WDT_BUS_STUCK_MS;
+// `irq_on` is SREG's I flag at the end of the pass.
+static inline bool wdt_may_feed(bool irq_on) {
+  (void)irq_on;
+  return false;  // RED stub
+}
+
+struct BusWatch {
+  uint16_t idle_ms;  // low 16 bits of millis() when the bus was last seen idle
+  bool released;     // the current hold has had its release
+};
+
+// `lines_idle` is this pass's sample of both lines high.
+static inline bool bus_release_due(uint16_t now, BusWatch &w, bool lines_idle) {
+  (void)now;
+  (void)w;
+  (void)lines_idle;
+  return false;  // RED stub
 }

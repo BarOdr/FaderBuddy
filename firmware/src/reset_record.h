@@ -32,9 +32,10 @@
 #define RESET_RECORD_HANDOFF (0xB00F)  // it left on purpose, for the bootloader
 
 struct ResetRecord {
-  uint16_t marker;   // RESET_RECORD_*, or noise after a power-up
-  uint8_t cause;     // RESET_CAUSE_* of this start; REG_RESET_CAUSE byte 0
-  uint8_t restarts;  // unexpected starts since the last cold one; byte 1
+  uint16_t marker;       // RESET_RECORD_*, or noise after a power-up
+  uint8_t cause;         // RESET_CAUSE_* of this start; REG_RESET_CAUSE byte 0
+  uint8_t restarts;      // unexpected starts since the last cold one; byte 1
+  uint8_t bus_releases;  // held-bus releases of this board's TWI since the last cold start; byte 2
 };
 
 // Called once at start, before anything else uses the record: classifies
@@ -55,4 +56,11 @@ static inline void reset_record_boot(ResetRecord &r) {
 // Called just before the application resets itself on purpose.
 static inline void reset_record_handoff(ResetRecord &r) {
   r.marker = RESET_RECORD_HANDOFF;
+}
+
+// Called when loop() has freed this board's TWI from a held bus
+// (wdt_feed.h): counts it, saturating at 255, so a host sees the bus was
+// held without any board having reset.
+static inline void reset_record_bus_released(ResetRecord &r) {
+  (void)r;  // RED stub
 }
