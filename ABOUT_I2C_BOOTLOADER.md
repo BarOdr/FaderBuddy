@@ -208,14 +208,43 @@ effectively impossible. After a power-on reset, RAM is indeterminate, but that
 path has neither `SWRF` set nor a valid token, so it correctly falls through to
 the application.
 
-### The application's watchdog (firmware 1.10+)
+### The application's watchdog and the held-bus release (firmware 1.10+)
 
 The application runs under the AVR hardware watchdog, about 1.0 s
-(`WDT_PERIOD_1KCLK_gc`). It is turned on as the last step of `setup()`. Each
-`loop()` pass feeds it only when interrupts are on and the fader bus has been
-idle (SDA and SCL both high) within the last 100 ms (`firmware/src/wdt_feed.h`).
-A hung board, or a bus held low for about 1.1 s, therefore resets the board.
-Every board that sees the held bus resets, not only the one holding it.
+(`WDT_PERIOD_1KCLK_gc`). It is turned on as the last step of `setup()` and fed
+at the end of every `loop()` pass that runs with interrupts on
+(`firmware/src/wdt_feed.h`). A stopped CPU, a loop that never comes back, or a
+loop left running with interrupts off (frozen `millis()`, TWI never served)
+therefore resets the board. Nothing else does: in particular a held bus does
+not (it did in firmware 1.10, which was never flashed on a fader; see below).
+
+**A held bus is released, not reset (firmware 1.11+).** Each `loop()` pass
+samples SDA and SCL (PB0, PB1). When neither line has been high at any pass
+for 100 ms, the board frees its own TWI (`twi_release()` in `main.cpp`): the
+slave is disabled and enabled again, which drops its clock stretch or a slave
+transmitter left driving SDA low after the host gave up mid-read, discards its
+state machine and pending flags, and keeps the address, so the next START is
+served as usual. Once per hold: the bus must be seen idle again before another
+release, so a line held by someone else (a shorted line, a stuck host) is not
+"released" ten times a second and counted as ten holds. Every board on the bus
+sees the hold the same way and each frees its TWI once, the holder among them;
+the others lose nothing. RAM state, calibration and the touch reference are
+untouched, so the host has nothing to resend and a finger resting on the cap
+during a release is still a touch afterwards. The host sees the release only
+as a byte-less gap of about 100 ms on the bus and a count in
+`REG_RESET_CAUSE`. The bus watch keeps the low 8 bits of `millis()`: the rule
+needs only "100 ms since the last idle sample", once per hold. A single pass
+slower than 156 ms can step over the 8-bit window, which delays that release
+by up to 256 ms, never loses it.
+
+What the release does not cover: a transaction in flight when the hold began
+is lost, like any transaction a bus glitch cuts short. If the host had sent
+part of a register write, the next START may deliver those bytes to
+`onI2cReceive` as a short write (megaTinyCore's Wire reports a host write when
+the following address match arrives); the handler checks each register's
+length and ignores a short write, as it does after any truncated transaction,
+and a write of the register byte alone selects that register for the next
+read, exactly as a complete one does.
 
 **Fuse assumption: `FUSE.WDTCFG` must stay 0.** Every reset reloads
 `WDT.CTRLA` from that fuse, so with 0 every reset turns the watchdog off:
@@ -229,7 +258,10 @@ without a reset, and `setup()` turns the watchdog on again.
 `firmware/tools/flash_with_fuses.py` writes only APPEND and BOOTEND. **Never set
 WDTCFG**: a non-zero value would reset a resident bootloader every period.
 
-**`REG_RESET_CAUSE` (0x16, read, 2 bytes): `[cause, restarts]`.**
+**`REG_RESET_CAUSE` (0x16, read, 3 bytes): `[cause, restarts, bus_releases]`.**
+Firmware 1.10 answered the first two; a 2-byte read still works, and a 3-byte
+read from 1.10 returns 0xFF as the third byte. `FW_VERSION_BUS_RELEASE`
+(0x010B) in `i2c_data.h` is the first version with the byte.
 
 | `cause` | Meaning |
 |---|---|
@@ -241,18 +273,24 @@ A UPDI flash, or a brown-out that keeps RAM, also reads as 2.
 
 - `restarts` counts the unexpected starts since the last cold start. It
   **saturates at 255** and the host cannot clear it.
-- A host should compare it with the last value it read and act on a change
-  (a delta), not on the absolute value. After a long session `02 nn` is
-  history, not a live fault.
+- `bus_releases` counts this board's held-bus releases since the last cold
+  start, saturating at 255 as well; it survives unexpected restarts and
+  bootloader handoffs like `restarts`. Every board on the bus counts the same
+  hold, so a host that wants the holder has to look at which board's count
+  moves when the others' do not, or at which one stops talking first.
+- A host should compare these counts with the last values it read and act on
+  a change (a delta), not on the absolute value. After a long session
+  `02 nn mm` is history, not a live fault.
 - The record lives in `.noinit` RAM, which `platformio.ini` pins at 0x3C00 for
   every application build, so it keeps its address across firmware versions.
 - The application cannot use `RSTCTRL.RSTFR`, because the bootloader clears
   it first.
 
-**After a watchdog reset the host must resend its configuration.** The motor
-coasts and the mode is INPUT_IDLE, so nothing moves until the host writes a
-target. Calibration loads from EEPROM, and touch recalibrates to whatever is on
-the cap at that moment. Everything held only in RAM goes back to its defaults:
+**After a watchdog reset the host must resend its configuration.** (Not after
+a bus release, which keeps everything.) The motor coasts and the mode is
+INPUT_IDLE, so nothing moves until the host writes a target. Calibration loads
+from EEPROM, and touch recalibrates to whatever is on the cap at that moment.
+Everything held only in RAM goes back to its defaults:
 
 - layers and their positions;
 - speed;
