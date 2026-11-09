@@ -76,7 +76,7 @@ for production purposes.
   merged, saturating counters written in a 6-byte-smaller form, and the dead
   initialiser of `control_dt_us` dropped (it is written on every tick before
   it is read): together 54 bytes, so the 1.11 application fits `fb_app_only`
-  with 0 bytes to spare (14 846 of 14 846 usable; 1.10 had 14 free). The
+  with 0 bytes to spare (14 846 of 14 846 usable; 1.10 had 12 free). The
   heartbeat LED phase is computed on 16-bit time: exact for the default
   512 ms period, a one-off phase skip every 65.5 s for a period that does not
   divide 65536.
