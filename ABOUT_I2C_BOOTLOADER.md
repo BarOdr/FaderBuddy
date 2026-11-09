@@ -223,8 +223,11 @@ samples SDA and SCL (PB0, PB1). When neither line has been high at any pass
 for 100 ms, the board frees its own TWI (`twi_release()` in `main.cpp`): the
 slave is disabled and enabled again, which drops its clock stretch or a slave
 transmitter left driving SDA low after the host gave up mid-read, discards its
-state machine and pending flags, and keeps the address, so the next START is
-served as usual. Once per hold: the bus must be seen idle again before another
+state machine and keeps the address, so the next START is served as usual.
+(The `SSTATUS` write in between clears `COLL` and `BUSERR` only; `APIF` and
+`DIF` are cleared by `SDATA`/`SCMD` writes, never by `SSTATUS`, see section
+12. A stale one of those would make the Wire ISR run once and end with its
+`SCTRLB` write, as after any event.) Once per hold: the bus must be seen idle again before another
 release, so a line held by someone else (a shorted line, a stuck host) is not
 "released" ten times a second and counted as ten holds. Every board on the bus
 sees the hold the same way and each frees its TWI once, the holder among them;
@@ -237,14 +240,33 @@ needs only "100 ms since the last idle sample", once per hold. A single pass
 slower than 156 ms can step over the 8-bit window, which delays that release
 by up to 256 ms, never loses it.
 
+**The host must give up first.** The release assumes the host's transaction
+timeout is shorter than `WDT_BUS_STUCK_MS` (100 ms): the Surface's fader bus
+uses about 50 ms (`faderWire.setTimeOut(50)`; its FaderBuddy updater's 250 ms
+talks to the bootloader, which has no release). A host that waited longer than
+100 ms on a stretched clock would, at the release, finish clocking its read
+with SDA floating and take 0xFF bytes as data (a position of 255, say). Keep
+the two apart when either changes.
+
 What the release does not cover: a transaction in flight when the hold began
-is lost, like any transaction a bus glitch cuts short. If the host had sent
-part of a register write, the next START may deliver those bytes to
-`onI2cReceive` as a short write (megaTinyCore's Wire reports a host write when
-the following address match arrives); the handler checks each register's
-length and ignores a short write, as it does after any truncated transaction,
-and a write of the register byte alone selects that register for the next
-read, exactly as a complete one does.
+is lost, like any transaction a bus glitch cuts short, with two one-off
+after-effects:
+
+- **One stale read of 0xFF bytes is possible.** megaTinyCore's Wire keeps a
+  private `client_irq_mask` that includes `RXACK` once it has transmitted a
+  byte, and clears it only when the host NACKs. A read cut short by the
+  release leaves it set, so the next read's first data interrupt may see a
+  stale `RXACK`, answer with `COMPTRANS`, and the host gets `FF FF ...` once;
+  the read after that is normal. A single 0xFF state read right after a held
+  bus is this, not a new fault.
+- **A partial host write may arrive at the next START.** Wire reports a host
+  write when the following address match arrives, so the bytes of a write cut
+  short reach `onI2cReceive` then. The multi-byte registers check their length
+  and ignore a short write (a `REG_LAYER_TARGET` cut at 3 of 4 bytes is applied
+  as its 3-byte form, target without speed); `REG_CAL_TOUCH`, `REG_CLEAR_ERROR`
+  and `REG_SELF_CAL` act on the register byte alone, so a write of one of them
+  cut after that byte still runs. The host had sent that byte, and the same
+  happens after any truncated write.
 
 **Fuse assumption: `FUSE.WDTCFG` must stay 0.** Every reset reloads
 `WDT.CTRLA` from that fuse, so with 0 every reset turns the watchdog off:
@@ -278,6 +300,10 @@ A UPDI flash, or a brown-out that keeps RAM, also reads as 2.
   bootloader handoffs like `restarts`. Every board on the bus counts the same
   hold, so a host that wants the holder has to look at which board's count
   moves when the others' do not, or at which one stops talking first.
+- After an I2C update from a firmware that never wrote the byte (1.10 or
+  older) the handoff keeps the record, so `bus_releases` is RAM noise until
+  the next power cycle; deltas are still meaningful. From 1.9 or older the
+  marker is noise, the start reads as cold, and the byte is zeroed.
 - A host should compare these counts with the last values it read and act on
   a change (a delta), not on the absolute value. After a long session
   `02 nn mm` is history, not a live fault.

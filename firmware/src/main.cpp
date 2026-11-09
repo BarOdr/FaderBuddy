@@ -740,15 +740,21 @@ void setup_i2c() {
 // Disabling the slave hands PB0/PB1 back to the port (inputs, so both lines
 // float high) and discards the slave state machine, whether it was stretching
 // SCL in CLKHOLD or left as a transmitter driving a 0 data bit on SDA after
-// the host gave up mid-read; the pending flags go with it and the address in
-// SADDR stays, so re-enabling arms the slave for the next START exactly as
-// Wire.begin() did. Everything else - RAM state, calibration, the touch
+// the host gave up mid-read. The address in SADDR stays, so re-enabling arms
+// the slave for the next START exactly as Wire.begin() did. The SSTATUS write
+// clears COLL and BUSERR only: APIF and DIF are cleared by writing SDATA or
+// SCMD, never by writing SSTATUS (ABOUT_I2C_BOOTLOADER.md, section 12), so a
+// stale one of those, if the ENABLE toggle leaves it, makes the Wire ISR run
+// once and end with its SCTRLB write, as after any event. What the toggle
+// cannot reach is Wire's own state: its buffer counters are reset at the
+// next address match, as after any STOP, but its client_irq_mask keeps
+// RXACK set when a read was cut short, so the next read may get one answer
+// of 0xFF bytes before Wire recovers (documented in the ABOUT file; not a
+// fault to chase). Everything else - RAM state, calibration, the touch
 // reference - is untouched, which is the point: in firmware 1.10 the same
 // condition reset the chip, and a finger resting on the cap through that
-// reset was calibrated in as "no touch". Wire's own buffer counters are
-// reset by the library at the next address match, as after any STOP.
-// MCTRLB.FLUSH is not used: on this part it restarts the host state machine
-// only.
+// reset was calibrated in as "no touch". MCTRLB.FLUSH is not used: on this
+// part it restarts the host state machine only.
 void twi_release() {
   TWI0.SCTRLA = 0;
   TWI0.SSTATUS = TWI_DIF_bm | TWI_APIF_bm | TWI_COLL_bm | TWI_BUSERR_bm;

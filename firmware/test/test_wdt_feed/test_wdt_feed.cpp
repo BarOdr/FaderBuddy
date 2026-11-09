@@ -115,9 +115,10 @@ void test_a_bus_held_longer_than_the_clock_period_is_released_once() {
 }
 
 void test_a_pass_that_skips_the_window_releases_at_the_next_one() {
-  // A single slow pass (the 10 ms calibration delay, a long I2C request) can
-  // step over the 100..255 ms window of the 8-bit difference; the release is
-  // then late by up to one clock period, never lost.
+  // A hypothetical pass slower than 156 ms (none exists today: the longest,
+  // the calibration EEPROM save, is under 100 ms) can step over the 100..255
+  // ms window of the 8-bit difference; the release is then late by up to one
+  // clock period, never lost.
   BusWatch w = fresh();
   bus_release_due(0, w, true);
   TEST_ASSERT_FALSE(bus_release_due((uint8_t)260, w, false));  // reads as 4 ms

@@ -20,7 +20,11 @@
  *     transfers far more often than that, so a bus with neither line released
  *     for that long is held: by this board's TWI stretching the clock, or by
  *     a slave transmitter left driving SDA low when the host gave up
- *     mid-read. Once per hold: after a release the bus must be seen idle
+ *     mid-read. The host must have given up before the release: its
+ *     transaction timeout has to stay under WDT_BUS_STUCK_MS (the Surface's
+ *     fader bus uses about 50 ms), or a CLKHOLD release would let it finish
+ *     clocking a read with SDA floating and take 0xFF bytes as data.
+ *     Once per hold: after a release the bus must be seen idle
  *     before another is due, so a line held by someone else (a shorted line,
  *     a stuck host) is not "released" ten times a second and counted as ten
  *     holds, and a hold longer than the 16-bit clock period cannot look like

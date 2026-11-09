@@ -70,7 +70,13 @@ for production purposes.
   saturating at 255, kept across unexpected restarts and bootloader handoffs
   like `restarts`. A 2-byte read works as before; a 3-byte read from 1.10
   returns 0xFF as the third byte. `FW_VERSION_BUS_RELEASE` (0x010B) marks
-  the first version with the byte.
+  the first version with the byte. After an I2C update from 1.10 (which never
+  wrote the byte) the handoff keeps the record, so the byte is RAM noise until
+  the next power cycle; from 1.9 or older the start reads as cold and zeroes
+  it. The host's transaction timeout must stay under the 100 ms threshold
+  (the Surface uses about 50 ms); a read cut short by a release can make the
+  next read answer 0xFF bytes once (Wire's stale `RXACK` mask), documented in
+  ABOUT_I2C_BOOTLOADER.md.
 - One `millis()` read per `loop()` pass (shared by the touch library, the
   heartbeat LED and the bus watch), the two touch recalibration requests
   merged, saturating counters written in a 6-byte-smaller form, and the dead
