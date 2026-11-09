@@ -125,6 +125,7 @@ void test_cause_restarts_and_releases_are_the_three_wire_bytes_in_order() {
   // main.cpp sends REG_RESET_CAUSE straight from the record; a host reading
   // only the first two bytes (firmware 1.10) sees what it saw before.
   ResetRecord r = noise(RESET_RECORD_RUNNING, 6);
+  r.bus_releases = 0;  // the previous run saw no held bus
   reset_record_boot(r);
   reset_record_bus_released(r);
   reset_record_bus_released(r);

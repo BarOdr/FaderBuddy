@@ -26,7 +26,12 @@
  *     holds, and a hold longer than the 16-bit clock period cannot look like
  *     a fresh one.
  *
- * Time is the low 16 bits of millis(); differences wrap correctly.
+ * Time is the low 8 bits of millis(): the rule only has to notice 100 ms
+ * since the last idle sample, once per hold, and loop() passes every few
+ * milliseconds, so the 8-bit difference cannot step over its 100..255 window
+ * unnoticed except on a pass slower than 156 ms, which only delays the
+ * release by up to one 256 ms period. A wider clock costs flash the part
+ * does not have.
  */
 
 #pragma once
@@ -37,19 +42,23 @@
 
 // `irq_on` is SREG's I flag at the end of the pass.
 static inline bool wdt_may_feed(bool irq_on) {
-  (void)irq_on;
-  return false;  // RED stub
+  return irq_on;
 }
 
 struct BusWatch {
-  uint16_t idle_ms;  // low 16 bits of millis() when the bus was last seen idle
-  bool released;     // the current hold has had its release
+  uint8_t idle_ms;  // low 8 bits of millis() when the bus was last seen idle
+  bool released;    // the current hold has had its release
 };
 
-// `lines_idle` is this pass's sample of both lines high.
-static inline bool bus_release_due(uint16_t now, BusWatch &w, bool lines_idle) {
-  (void)now;
-  (void)w;
-  (void)lines_idle;
-  return false;  // RED stub
+// `now` is the low 8 bits of millis(); `lines_idle` is this pass's sample of
+// both lines high.
+static inline bool bus_release_due(uint8_t now, BusWatch &w, bool lines_idle) {
+  if (lines_idle) {
+    w.idle_ms = now;
+    w.released = false;
+    return false;
+  }
+  if (w.released || (uint8_t)(now - w.idle_ms) < WDT_BUS_STUCK_MS) return false;
+  w.released = true;
+  return true;
 }

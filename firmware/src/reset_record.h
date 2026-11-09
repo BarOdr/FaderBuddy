@@ -17,6 +17,10 @@
  *   - at the next start, RUNNING means it stopped without a handoff, which
  *     with the watchdog on is almost always the watchdog.
  *
+ * Since firmware 1.11 the record also counts the held-bus releases of this
+ * board's TWI (wdt_feed.h): a held bus frees the TWI instead of resetting
+ * the chip, so the host reads how often that happened next to the restarts.
+ *
  * A power-up matches a 16-bit marker by chance about once in 65536 starts and
  * is then reported as one unexpected restart; the restart count never
  * survives a power-up otherwise.
@@ -43,12 +47,14 @@ struct ResetRecord {
 static inline void reset_record_boot(ResetRecord &r) {
   if (r.marker == RESET_RECORD_RUNNING) {
     r.cause = RESET_CAUSE_UNEXPECTED;
-    if (r.restarts != 0xFF) r.restarts++;
+    uint8_t n = r.restarts + 1;
+    if (n != 0) r.restarts = n;  // saturates at 255; this form is 6 bytes smaller
   } else if (r.marker == RESET_RECORD_HANDOFF) {
     r.cause = RESET_CAUSE_HANDOFF;
   } else {
     r.cause = RESET_CAUSE_COLD;
     r.restarts = 0;
+    r.bus_releases = 0;
   }
   r.marker = RESET_RECORD_RUNNING;
 }
@@ -62,5 +68,6 @@ static inline void reset_record_handoff(ResetRecord &r) {
 // (wdt_feed.h): counts it, saturating at 255, so a host sees the bus was
 // held without any board having reset.
 static inline void reset_record_bus_released(ResetRecord &r) {
-  (void)r;  // RED stub
+  uint8_t n = r.bus_releases + 1;
+  if (n != 0) r.bus_releases = n;  // saturates at 255; this form is 6 bytes smaller
 }

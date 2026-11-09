@@ -46,7 +46,7 @@
  * different version without touching this default.
  */
 #define FW_VERSION_MAJOR (1)
-#define FW_VERSION_MINOR (10)
+#define FW_VERSION_MINOR (11)
 #ifndef FW_VERSION
 #define FW_VERSION ((FW_VERSION_MAJOR << 8) | FW_VERSION_MINOR)
 #endif
@@ -99,6 +99,11 @@
 // bump.
 #define FW_VERSION_RESET_CAUSE (0x010A)  // 1.10
 
+// Minimum firmware version that frees its TWI from a held bus instead of
+// resetting the chip, and reports the count as byte 2 of REG_RESET_CAUSE.
+// Firmware 1.10 answers two bytes there; a third byte read from it is 0xFF.
+#define FW_VERSION_BUS_RELEASE (0x010B)  // 1.11
+
 
 /*
  * I2C Register Map (Protocol Version 5)
@@ -150,7 +155,7 @@
  * -----|---------------------|---------|------|------------
  * 0x15 | MOVE_PROFILE        | R/W     |u8[3] | Move profile: mode + brake time in ms (see below; FW 1.9+)
  * -----|---------------------|---------|------|------------
- * 0x16 | RESET_CAUSE         | R       |u8[2] | Why the app last started + unexpected restarts (see below; FW 1.10+)
+ * 0x16 | RESET_CAUSE         | R       |u8[3] | Why the app last started + unexpected restarts + bus releases (see below; FW 1.10+, byte 2 FW 1.11+)
  * -----|---------------------|---------|------|------------
  * 0x17 | ...                 |         |      | (free - next production register goes here)
  * -----|---------------------|---------|------|------------
@@ -207,15 +212,16 @@
 #define REG_IDLE_DURATION 0x13  // Input idle time in ms (R/W, u16 big-endian, see below)
 #define REG_LAYER_NOTCHES 0x14  // Placed notch positions (layer-addressed, R/W, u8[4], see below)
 #define REG_MOVE_PROFILE 0x15  // Move profile: mode + brake time (R/W, u8 + u16 big-endian, see below)
-#define REG_RESET_CAUSE 0x16  // Why the app last started + unexpected restart count (R, u8[2], see below)
+#define REG_RESET_CAUSE 0x16  // Why the app last started + unexpected restart count + bus release count (R, u8[3], see below)
 
 /*
- * REG_RESET_CAUSE (0x16) - read-only, 2 bytes, FW 1.10+.
+ * REG_RESET_CAUSE (0x16) - read-only, 3 bytes, FW 1.10+ (byte 2 FW 1.11+).
  *
- * [cause, restarts]. The application runs a hardware watchdog (about 1 s):
- * a board whose main loop stops, or whose I2C interface holds the clock
- * low, resets itself instead of holding the shared bus. This register
- * lets a host see that it happened.
+ * [cause, restarts, bus_releases]. The application runs a hardware watchdog
+ * (about 1 s): a board whose main loop stops resets itself instead of
+ * holding the shared bus. A board whose I2C interface holds a line low
+ * while its CPU runs frees the interface instead (FW 1.11+; in 1.10 it
+ * reset the chip). This register lets a host see that either happened.
  *
  * cause     RESET_CAUSE_COLD: power-up (or nothing usable in RAM).
  *           RESET_CAUSE_HANDOFF: the application left on purpose, through
@@ -227,6 +233,15 @@
  * restarts  RESET_CAUSE_UNEXPECTED starts since the last cold start,
  *           saturating at 255. A host that sees it grow knows the board
  *           restarted on its own, even when it missed the moment.
+ * bus_releases
+ *           Times since the last cold start that the board saw the bus held
+ *           (neither SDA nor SCL high for 100 ms) and freed its own TWI
+ *           (disabled and re-enabled, state machine restarted) without a
+ *           reset; one count per hold, saturating at 255. RAM state,
+ *           calibration and the touch reference are kept, so nothing needs
+ *           resending. A host that sees it grow knows the bus was held; the
+ *           other boards on the bus count the same hold. Reading only two
+ *           bytes still works as in 1.10.
  *
  * Not the hardware reset flags: the I2C bootloader reads and clears RSTFR
  * before the application starts, so the application keeps its own record in

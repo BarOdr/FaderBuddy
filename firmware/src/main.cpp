@@ -56,14 +56,15 @@ __attribute__((section(".noinit"))) ResetRecord reset_record;
 // (17 bytes of erase+write, under 100 ms) or the touch recalibration's
 // delay(10), so a pass that takes a whole period has stopped, not stalled.
 // Not set by fuse: every reset turns it off, so the bootloader never runs
-// under it and cannot reset-loop, and setup() turns it on again.
+// under it and cannot reset-loop, and setup() turns it on again. Only a
+// stopped CPU or loop trips it: a held bus is handled by twi_release() below.
 #define WDT_PERIOD WDT_PERIOD_1KCLK_gc
 
-// The fader bus lines on VPORTB (TWI0 default pins: PB0 SCL, PB1 SDA). A held
-// bus resets the board after WDT_BUS_STUCK_MS plus one watchdog period, about
-// 1.1 s (wdt_feed.h, loop() below).
+// The fader bus lines on VPORTB (TWI0 default pins: PB0 SCL, PB1 SDA). A bus
+// with neither line high for WDT_BUS_STUCK_MS frees this board's TWI once
+// (wdt_feed.h, twi_release(), loop() below); no reset.
 #define I2C_LINES_bm ((1 << 0) | (1 << 1))
-uint16_t bus_idle_ms = 0;  // low 16 bits of millis() when the bus was last idle
+BusWatch bus_watch = {0, false};
 
 #define PIN_LED (PIN_PB2)
 #define LED_bm (1 << 2)  // PIN_LED on VPORTB, for direct port access
@@ -164,7 +165,10 @@ volatile uint8_t move_profile_mode = MOVE_PROFILE_SMOOTH;
 volatile uint16_t move_profile_time_ms = MOVE_BRAKE_TIME_DEFAULT_MS;
 uint32_t last_control_tick_us = 0;
 uint32_t last_control_exec_us = 0;
-uint32_t control_dt_us = CONTROL_TICK_US;  // measured interval of the current tick
+// Measured interval of the current tick. Written by loop() on every tick before
+// motor_update() reads it, so it needs no initialiser (one would cost 4 bytes
+// of flash for the .data image).
+uint32_t control_dt_us;
 #if DEBUG_DRIVE
 uint16_t control_tick_period_us = CONTROL_TICK_US;  // runtime-tunable for sweeps
 #else
@@ -502,7 +506,7 @@ void onI2cRequest() {
   } else if (r == REG_IDLE_DURATION) {
       i2c_write_u16(idle_duration_ms);
   } else if (r == REG_RESET_CAUSE) {
-      Wire.write(&reset_record.cause, 2);  // [cause, restarts], adjacent in the record
+      Wire.write(&reset_record.cause, 3);  // [cause, restarts, bus_releases], adjacent in the record
   } else if (r == REG_MOVE_PROFILE) {
       Wire.write(move_profile_mode);
       i2c_write_u16(move_profile_time_ms);
@@ -730,6 +734,25 @@ void setup_i2c() {
   Wire.begin(address);
   Wire.onRequest(onI2cRequest);
   Wire.onReceive(onI2cReceive);
+}
+
+// Frees the fader bus from whatever this board's TWI holds, without a reset.
+// Disabling the slave hands PB0/PB1 back to the port (inputs, so both lines
+// float high) and discards the slave state machine, whether it was stretching
+// SCL in CLKHOLD or left as a transmitter driving a 0 data bit on SDA after
+// the host gave up mid-read; the pending flags go with it and the address in
+// SADDR stays, so re-enabling arms the slave for the next START exactly as
+// Wire.begin() did. Everything else - RAM state, calibration, the touch
+// reference - is untouched, which is the point: in firmware 1.10 the same
+// condition reset the chip, and a finger resting on the cap through that
+// reset was calibrated in as "no touch". Wire's own buffer counters are
+// reset by the library at the next address match, as after any STOP.
+// MCTRLB.FLUSH is not used: on this part it restarts the host state machine
+// only.
+void twi_release() {
+  TWI0.SCTRLA = 0;
+  TWI0.SSTATUS = TWI_DIF_bm | TWI_APIF_bm | TWI_COLL_bm | TWI_BUSERR_bm;
+  TWI0.SCTRLA = TWI_DIEN_bm | TWI_APIEN_bm | TWI_PIEN_bm | TWI_ENABLE_bm;
 }
 
 void increment_position_nonce() {
@@ -1617,23 +1640,16 @@ void loop() {
   // range) in state.error and then skips the node for good; its recal request
   // doesn't clear the flag. Seen on 1-2 of 8 boards at power-up, leaving the
   // reference at 0 and touch dead until a power cycle. Retry instead.
-  if (touch_sensor.state.error) {
+  // The first calibration after setup() (pending_calibrate_touch) shares the
+  // request, after letting the motor coast so the fader is still.
+  if (pending_calibrate_touch || touch_sensor.state.error) {
+    if (pending_calibrate_touch) {
+      pending_calibrate_touch = false;
+      motor_coast();
+      delay(10);
+    }
     touch_sensor.state.error = 0;
     ptc_node_request_recal(&touch_sensor);
-  }
-
-  if (pending_calibrate_touch) {
-    pending_calibrate_touch = false;
-    motor_coast();
-    delay(10);
-    touch_sensor.state.error = 0;
-    ptc_node_request_recal(&touch_sensor);
-    // for (uint8_t i = 0; i < 4; i++) {
-    //   digitalWrite(PIN_LED, HIGH);
-    //   delay(100);
-    //   digitalWrite(PIN_LED, LOW);
-    //   delay(100);
-    // }
   }
   // Keep the position filter fed from the free-running ADC on every pass, but
   // run the control law on a fixed tick so gains and filter constants have
@@ -1664,25 +1680,34 @@ void loop() {
     interrupts();
   }
 
-  ptc_process(millis());
+  // One millis() read for the rest of the pass (each call is ~10 bytes and an
+  // interrupt-off window; the part has no flash to spare).
+  uint32_t now_ms = millis();
+  ptc_process(now_ms);
 
   // Straight to the port: digitalWrite() is ~180 bytes of pin lookup for a
-  // heartbeat LED on a part with no flash to spare.
+  // heartbeat LED on a part with no flash to spare. 16-bit time for the same
+  // reason: exact for a period that divides 65536 (the default 512 is), and a
+  // one-off phase skip every 65.5 s for any other.
   if ((motor_drive_value != 0) ||
-      (millis() % DEBUG_LED_BLINK_PERIOD_MS < DEBUG_LED_BLINK_PERIOD_MS / 4)) {
+      ((uint16_t)now_ms % DEBUG_LED_BLINK_PERIOD_MS < DEBUG_LED_BLINK_PERIOD_MS / 4)) {
     VPORTB.OUT |= LED_bm;
   } else {
     VPORTB.OUT &= ~LED_bm;
   }
 
-  // Feed the watchdog once per healthy pass: the loop runs, interrupts are
-  // on, and the shared fader bus was idle within WDT_BUS_STUCK_MS (the rule
-  // and its reasons: wdt_feed.h). Every board on the bus sees a held bus the
-  // same way, so all of them reset, the one holding it among them; that
-  // releases the bus, and the others only lose their RAM state, which the
-  // host already lost with the bus.
-  if (wdt_may_feed((uint16_t)millis(), bus_idle_ms, (VPORTB.IN & I2C_LINES_bm) == I2C_LINES_bm, SREG & CPU_I_bm))
-    __builtin_avr_wdr();
+  // A bus with neither line high for WDT_BUS_STUCK_MS is held (the rule and
+  // its reasons: wdt_feed.h). Every board on the bus sees it the same way and
+  // each frees its own TWI once, the holder among them; the others lose
+  // nothing, and all of them count it for REG_RESET_CAUSE.
+  if (bus_release_due((uint8_t)now_ms, bus_watch, (VPORTB.IN & I2C_LINES_bm) == I2C_LINES_bm)) {
+    twi_release();
+    reset_record_bus_released(reset_record);
+  }
+
+  // Feed the watchdog once per healthy pass: the loop runs with interrupts
+  // on. The bus state plays no part (wdt_feed.h).
+  if (wdt_may_feed(SREG & CPU_I_bm)) __builtin_avr_wdr();
 }
 
 // One path for every change of the effective touch, sensed or injected, so the
