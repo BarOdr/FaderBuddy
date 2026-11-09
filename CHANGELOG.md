@@ -49,6 +49,49 @@ for production purposes.
 
 ### Unreleased
 
+- **Firmware 1.11: a held bus is released, not reset.** Replaces the 1.10
+  rule under which a bus with neither line high for 100 ms made every board
+  stop feeding the watchdog and reset about 1 s later (RAM state lost, touch
+  recalibrated to whatever rested on the cap, host configuration to resend).
+  Now each `loop()` pass feeds the watchdog whenever interrupts are on, and a
+  bus seen held for 100 ms frees this board's TWI instead (`twi_release()`:
+  slave disabled and enabled again, pending flags cleared, address kept),
+  which drops a clock stretch or a slave transmitter left driving SDA low.
+  Once per hold: the bus must be seen idle again before another release, so
+  a line held by someone else is not "released" ten times a second. Every
+  board on the bus does the same, the holder among them; the others lose
+  nothing. RAM state, calibration and the touch reference are kept, and the
+  host has nothing to resend. The watchdog now fires only for a stopped CPU
+  or loop. The rules are pure functions in `firmware/src/wdt_feed.h` with
+  host tests (`test_wdt_feed`); the bus watch keeps the low 8 bits of
+  `millis()`.
+- **`REG_RESET_CAUSE` is 3 bytes: `[cause, restarts, bus_releases]`.** The
+  new byte counts this board's held-bus releases since the last cold start,
+  saturating at 255, kept across unexpected restarts and bootloader handoffs
+  like `restarts`. A 2-byte read works as before; a 3-byte read from 1.10
+  returns 0xFF as the third byte. `FW_VERSION_BUS_RELEASE` (0x010B) marks
+  the first version with the byte. After an I2C update from 1.10 (which never
+  wrote the byte) the handoff keeps the record, so the byte is RAM noise until
+  the next power cycle; from 1.9 or older the start reads as cold and zeroes
+  it. The host's transaction timeout must stay under the 100 ms threshold
+  (the Surface uses about 50 ms); a read cut short by a release can make the
+  next read answer 0xFF bytes once (Wire's stale `RXACK` mask), documented in
+  ABOUT_I2C_BOOTLOADER.md.
+- One `millis()` read per `loop()` pass (shared by the touch library, the
+  heartbeat LED and the bus watch), the two touch recalibration requests
+  merged, saturating counters written in a 6-byte-smaller form, and the dead
+  initialiser of `control_dt_us` dropped (it is written on every tick before
+  it is read): together 54 bytes, so the 1.11 application fits `fb_app_only`
+  with 0 bytes to spare (14 846 of 14 846 usable; 1.10 had 12 free). The
+  heartbeat LED phase is computed on 16-bit time: exact for the default
+  512 ms period, a one-off phase skip every 65.5 s for a period that does not
+  divide 65536.
+- Skipped: restoring the PTC calibration (compensation and reference) from
+  `.noinit` after a watchdog reset instead of recalibrating. It needs about
+  60 bytes of flash the image no longer has; with a held bus no longer
+  resetting the chip, a watchdog reset is a real hang and recalibrating is the
+  right thing to do there anyway.
+
 - **Firmware 1.10: hardware watchdog and reset cause.** The application now
   runs under the AVR watchdog (about 1.0 s, `WDT_PERIOD_1KCLK_gc`), enabled at
   the end of `setup()` and fed only at the end of a healthy `loop()` pass. The
